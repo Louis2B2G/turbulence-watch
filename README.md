@@ -52,9 +52,9 @@ flowchart LR
 
 ## Deploy your own
 
-1. **Fork or use this repo.** The Action needs write access to push the `data` branch: Settings → Actions → General → Workflow permissions → *Read and write*.
-2. **Build the data once.** Actions → *Forecast fields* → *Run workflow* (tick *force*). It takes about 5 minutes and creates the `data` branch. After that it runs every hour by itself.
-3. **Import into Vercel.** New Project → import the repo. Framework preset: *Other*. Leave build and output settings empty (`vercel.json` sets the output to `public/`). Deploy.
+1. **Fork or use this repo.** In a fork, enable Actions (Actions tab). If the publish step fails with a 403, set Settings → Actions → General → Workflow permissions to *Read and write*.
+2. **Build the data once.** Actions → *Forecast fields* → *Run workflow* (tick *force*). It takes about 4 minutes and creates the `data` branch. After that it runs every hour by itself and only rebuilds when a new forecast is out.
+3. **Import into Vercel.** New Project → import the repo. Framework preset: *Other*. Leave build and output settings empty (`vercel.json` sets the output to `public/`). Deploy. Commits to the `data` branch carry their own `vercel.json` so Vercel doesn't deploy them.
 
 That's it. The functions read the data branch of whichever repo Vercel deployed from. Optional environment variables:
 
