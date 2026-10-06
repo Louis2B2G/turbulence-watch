@@ -13,6 +13,7 @@ Products (EDR scale: value * 0.0025, 0..0.6375 m^2/3 s^-1; cbtop: value * 0.25 k
   ifs1, ifs2         same, ECMWF IFS 0.25 (open data)
   aifs1, aifs2       same, ECMWF AIFS (AI model, open data, 6-hourly)
   conv               storm-turbulence proxy from GFS CAPE, precipitation rate and high cloud, 1 deg neighbourhood max
+  windu, windv       GFS cruise-level wind (mean of 250 and 200 hPa) in m/s, stored as value - 128 (flight times, dead reckoning)
 
 Every diagnostic is quantile-mapped onto the official WAFS EDR distribution for the same valid time and level,
 the way NCAR's GTG remaps diagnostics onto the EDR scale, so all members share the ICAO scale.
@@ -359,6 +360,12 @@ def main():
                 c = conv_proxy(F, lat, lon)
                 if c is not None:
                     put("conv", vt, enc(c, EDR_SCALE))
+                if all(k in F for k in (("u", 250), ("u", 200), ("v", 250), ("v", 200))):
+                    for comp in ("u", "v"):
+                        w = 0.5 * (F[(comp, 250)] + F[(comp, 200)])
+                        if w.shape != (NLAT, NLON):
+                            w = w[:2 * (NLAT - 1) + 1:2, :2 * NLON:2]   # 0.25 -> 0.5 deg by subsampling (winds are smooth)
+                        put("wind" + comp, vt, enc(w + 128.0, 1.0))
             log("done", model, vt.isoformat(), f"step {step}")
         sw = sigwx(w_iss, vt)
         for kind, text in sw.items():
@@ -366,7 +373,7 @@ def main():
             open(os.path.join(OUT, name), "w").write(text); files.setdefault(f"sigwx_{kind}", {})[vt.isoformat()] = name
     manifest = {"updated": now.isoformat(), "sources": sources,
                 "grid": {"lat0": 90.0, "lon0": -180.0, "dlat": -DLL, "dlon": DLL, "nlat": NLAT, "nlon": NLON, "dtype": "uint8", "order": "row-major, row 0 = 90N"},
-                "scale": {"edr": EDR_SCALE, "cbtop_kft": CB_SCALE},
+                "scale": {"edr": EDR_SCALE, "cbtop_kft": CB_SCALE, "wind_ms": 1.0, "wind_offset": -128},
                 "times": sorted({t for p in files.values() for t in p}), "files": files,
                 "weights": {"wafs": 0.4, "ifs": 0.25, "gfs": 0.2, "aifs": 0.15}}
     json.dump(manifest, open(os.path.join(OUT, "manifest.json"), "w"), indent=1)

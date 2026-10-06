@@ -39,11 +39,11 @@ const col = (g) => `var(${level(g).c})`;
 // k = peak extra g per unit EDR at mid-flight weight. Wide-body reference: A350 at 250 t ~ 1.5 (gust-load formula).
 // Smaller aircraft have lower wing loading and respond more; the factors are deliberately modest.
 const CLS = {
-  heavy: { name: "Wide-body", k: 1.5, v: 880, fl: 370 },
-  narrow: { name: "Narrow-body", k: 1.72, v: 830, fl: 360 },
-  regional: { name: "Regional jet", k: 1.95, v: 780, fl: 340 },
-  turboprop: { name: "Turboprop", k: 2.25, v: 500, fl: 240 },
-  bizjet: { name: "Business jet", k: 2.1, v: 800, fl: 410 },
+  heavy: { name: "Wide-body", k: 1.5, v: 905, fl: 370 },      // v: cruise true airspeed, km/h (Mach 0.85 at FL370)
+  narrow: { name: "Narrow-body", k: 1.72, v: 840, fl: 360 },
+  regional: { name: "Regional jet", k: 1.95, v: 790, fl: 340 },
+  turboprop: { name: "Turboprop", k: 2.25, v: 510, fl: 240 },
+  bizjet: { name: "Business jet", k: 2.1, v: 830, fl: 410 },
 };
 const TYPES = {};
 const addTypes = (cls, s) => s.split(",").forEach((x) => { const [code, name] = x.split(":"); TYPES[code] = [name || code, cls]; });
@@ -193,71 +193,111 @@ function resolveRoute() {
 }
 
 /* ------------------------------------------------------------------ position */
+// Track points: [lat, lon, time, altitude ft, ground speed km/h, track deg, source] - ADS-B, phone GPS, or "you" (a correction)
 function recordFix(p) {
   if (!p || p.lat == null) return;
   const t = Date.parse(p.t), tr = F.st.track;
-  if (tr.length && Math.abs(tr[tr.length - 1][2] - t) < 15e3) return;
-  if (tr.length && t < tr[tr.length - 1][2]) return;
-  tr.push([+p.lat.toFixed(4), +p.lon.toFixed(4), t, p.alt_ft ?? null, p.gs_kmh ?? null, p.track ?? null]);
-  if (tr.length > 800) F.st.track = tr.filter((_, i) => i % 2 === 0 || i > tr.length - 200);
+  if (tr.some((x) => Math.abs(x[2] - t) < 15e3 && x[6] !== "you")) return;
+  tr.push([+p.lat.toFixed(4), +p.lon.toFixed(4), t, p.alt_ft ?? null, p.gs_kmh ?? null, p.track ?? null, p.src || "ADS-B"]);
+  tr.sort((a, b) => a[2] - b[2]);
+  if (tr.length > 800) F.st.track = tr.filter((x, i) => i % 2 === 0 || i > tr.length - 200 || x[6] === "you");
 }
+const SRC_NAME = (s) => (s === "GPS" ? "your phone's GPS" : s === "you" ? "your correction" : s || "earlier fix");
 function positionNow() {
   const st = F.st, now = Date.now(), c = [];
   const p = F.info?.position;
   if (p && now - Date.parse(p.t) < 14 * HOUR) c.push({ lat: p.lat, lon: p.lon, t: Date.parse(p.t), alt: p.alt_ft, gs: p.gs_kmh, trk: p.track, src: p.src, kind: "fix" });
   const tr = st.track[st.track.length - 1];
-  if (tr && now - tr[2] < 14 * HOUR) c.push({ lat: tr[0], lon: tr[1], t: tr[2], alt: tr[3], gs: tr[4], trk: tr[5], src: "earlier fix", kind: "fix" });
-  if (st.manual && now - st.manual.t < 14 * HOUR) c.push({ ...st.manual, src: "you", kind: "manual" });
+  if (tr && now - tr[2] < 14 * HOUR) c.push({ lat: tr[0], lon: tr[1], t: tr[2], alt: tr[3], gs: tr[4], trk: tr[5], src: SRC_NAME(tr[6]), kind: tr[6] === "you" ? "manual" : "fix", gps: tr[6] === "GPS" });
   c.sort((a, b) => b.t - a.t);
   const f = c[0];
   if (f) {
-    const ground = f.kind !== "manual" && f.alt != null && f.alt < 400 && (f.gs == null || f.gs < 150);
+    const ground = f.kind !== "manual" && !f.gps && f.alt != null && f.alt < 400 && (f.gs == null || f.gs < 150);
     if (ground) {
       if (F.dest && hav(f.lat, f.lon, F.dest.lat, F.dest.lon) < 40) return { ...f, kind: "landed" };
       const o = F.origin || f;
       return { lat: o.lat, lon: o.lon, t: Math.max(now, st.dep || now), alt: 0, gs: 0, trk: null, kind: "ground", src: f.src };
     }
     if (f.kind !== "manual") f.kind = now - f.t < 5 * MIN ? "live" : "dr";
+    if (!(f.gs > 250)) f.gsCal = calibratedSpeed(f);
     return f;
   }
   if (!F.origin) return null;
   if (st.dep && st.dep <= now) return { lat: F.origin.lat, lon: F.origin.lon, t: st.dep, alt: 0, gs: 0, trk: null, kind: "takeoff", src: "your takeoff time" };
   return { lat: F.origin.lat, lon: F.origin.lon, t: Math.max(now, st.dep || 0), alt: 0, gs: 0, trk: null, kind: st.dep ? "planned" : "unknown", src: "" };
 }
+// Average ground speed into a fix that has none (a correction): from the previous fix at least 20 min earlier,
+// or from the takeoff (about 90 km covered in the first 12 minutes of climb).
+function calibratedSpeed(f) {
+  const st = F.st, refs = [];
+  for (const p of st.track) if (f.t - p[2] >= 20 * MIN) refs.push({ lat: p[0], lon: p[1], t: p[2], off: 0 });
+  if (st.dep && F.origin && f.t - st.dep > 40 * MIN) refs.push({ lat: F.origin.lat, lon: F.origin.lon, t: st.dep + 12 * MIN, off: 90 });
+  refs.sort((a, b) => b.t - a.t);
+  for (const r of refs) {
+    const v = (hav(r.lat, r.lon, f.lat, f.lon) - r.off) / ((f.t - r.t) / HOUR);
+    if (v > 500 && v < 1250) return v;
+  }
+  return null;
+}
 const airborneKind = (k) => k === "live" || k === "dr" || k === "manual" || k === "takeoff";
+// along-track wind component (km/h) for wind [u east, v north] in m/s and a heading in degrees
+const windAlong = (w, h) => (w ? (w[0] * Math.sin(h * DEG) + w[1] * Math.cos(h * DEG)) * 3.6 : 0);
 
 /* ------------------------------------------------------------------ projected path */
-// Minute-by-minute: from the current fix, turning from the present heading onto the great circle to the destination,
-// cruise speed relaxing from the measured ground speed to typical, climb and descent profiles at the ends.
-function buildPath(fx, dest, cls) {
-  const lat = [], lon = [], fl = [], ph = [], dist = [];
+// Minute-by-minute: from the current fix, turning from the present heading onto the great circle to the destination.
+// Ground speed = cruise true airspeed + the forecast wind along the track (GFS, cruise level); a measured or calibrated
+// ground speed takes over for the first hour. Climb and descent profiles at the ends.
+function buildPath(fx, dest, cls, windAt = null) {
+  const lat = [], lon = [], fl = [], ph = [], dist = [], gs = [];
   const flying = fx.kind === "live" || fx.kind === "dr" || fx.kind === "manual";
   const flCr = flying && fx.alt > 24000 ? Math.round(fx.alt / 1000) * 10 : cls.fl;
+  const v0 = flying ? (fx.gs > 250 ? fx.gs : fx.gsCal || null) : null;
   let a = fx.lat, b = fx.lon;
   if (!dest) {
-    const h = fx.trk ?? 0, v = flying && fx.gs > 250 ? fx.gs : cls.v;
-    for (let m = 0; m <= 180; m++) { lat.push(a); lon.push(b); fl.push(flCr); ph.push(0); dist.push(null); [a, b] = move(a, b, h, v / 60); }
-    return { lat, lon, fl, ph, dist, M: lat.length, straight: true, D0: null, flCr };
+    const h = fx.trk ?? 0;
+    for (let m = 0; m <= 180; m++) {
+      const v = v0 || cls.v + windAlong(windAt && windAt(a, b), h);
+      lat.push(a); lon.push(b); fl.push(flCr); ph.push(0); dist.push(null); gs.push(Math.round(v));
+      [a, b] = move(a, b, h, v / 60);
+    }
+    return { lat, lon, fl, ph, dist, gs, M: lat.length, straight: true, D0: null, flCr };
   }
   const D0 = hav(a, b, dest.lat, dest.lon);
   const climbFrom = flying ? (fx.alt ?? flCr * 100) / 100 : 0;
   const climbMin = flying ? (D0 > 400 && climbFrom < flCr - 15 ? (flCr - climbFrom) / 20 : 0) : 22;
-  const v0 = flying && fx.gs > 250 ? fx.gs : null;
   const b0 = brg(a, b, dest.lat, dest.lon), dth = flying && fx.trk != null ? wrap(fx.trk - b0) : 0;
   const desc = Math.min(230, D0);
   for (let m = 0; m < 30 * 60; m++) {
     const d = hav(a, b, dest.lat, dest.lon);
-    let v, f, p = 0;
-    const vc = cls.v + ((v0 ?? cls.v) - cls.v) * Math.exp(-m / 120);
-    if (m < climbMin) { const x = (m + 0.5) / climbMin; v = (v0 ?? 380) + (vc - (v0 ?? 380)) * x; f = climbFrom + (flCr - climbFrom) * x; p = 1; }
-    else { v = vc; f = flCr; }
-    if (d < desc) { const x = d / desc; v = 420 + (v - 420) * x; f = Math.min(f, flCr * x); p = 2; }
-    lat.push(a); lon.push(b); fl.push(Math.round(f)); ph.push(p); dist.push(d);
-    if (d < 2) break;
     const h = brg(a, b, dest.lat, dest.lon) + dth * Math.exp(-m / 8);
+    let p = m < climbMin ? 1 : 0;
+    if (d < desc) p = 2;
+    const cruise = clamp(cls.v + windAlong(windAt && windAt(a, b), h) * (p ? 0.6 : 1), cls.v * 0.55, cls.v * 1.45);
+    const vc = v0 ? cruise + (v0 - cruise) * Math.exp(-m / 60) : cruise;
+    let v, f;
+    if (m < climbMin) { const x = (m + 0.5) / climbMin, s0 = v0 ?? 380; v = s0 + (vc - s0) * x; f = climbFrom + (flCr - climbFrom) * x; }
+    else { v = vc; f = flCr; }
+    if (d < desc) { const x = d / desc; v = 420 + (v - 420) * x; f = Math.min(f, flCr * x); }
+    lat.push(a); lon.push(b); fl.push(Math.round(f)); ph.push(p); dist.push(d); gs.push(Math.round(v));
+    if (d < 2) break;
     [a, b] = move(a, b, h, Math.min(v / 60, d));
   }
-  return { lat, lon, fl, ph, dist, M: lat.length, straight: false, D0, flCr };
+  return { lat, lon, fl, ph, dist, gs, M: lat.length, straight: false, D0, flCr };
+}
+// Cruise winds along a first-guess path (one light request), as a nearest-point lookup.
+async function windsAlong(path, t0) {
+  const pts = [];
+  for (let m = 0; m < path.M; m += 20) pts.push([+path.lat[m].toFixed(2), +path.lon[m].toFixed(2), t0 + m * MIN, 360]);
+  if (!pts.length) return null;
+  const js = await api("/api/sample", { body: { points: pts.slice(0, 300), only: "wind" } }, 15000);
+  const W = (js.points || []).map((p, i) => (p && p.w ? [pts[i][0], pts[i][1], p.w] : null)).filter(Boolean);
+  if (!W.length) return null;
+  return (la, lo) => {
+    let best = W[0], bd = Infinity;
+    const cl = Math.cos(la * DEG);
+    for (const w of W) { const dy = la - w[0], dx = wrap(lo - w[1]) * cl, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = w; } }
+    return best[2];
+  };
 }
 // Cross-track spread (km, 1 sigma): grows from the plane, peaks mid-way, pinches to zero at the destination
 // (a Brownian-bridge-like corridor). Real routes stray ~3% of the distance from the great circle.
@@ -473,7 +513,10 @@ async function compute() {
   if (!fx) { F.D = null; return; }
   if (fx.kind === "landed") { F.D = { landed: true, at: Date.now() }; return; }
   const cls = classFor();
-  const path = buildPath(fx, F.dest, cls), sigma = corridor(path, fx);
+  // first guess without wind -> cruise winds along it -> the real path (ground speed = airspeed + wind)
+  let windAt = null;
+  try { windAt = await windsAlong(buildPath(fx, F.dest, cls), fx.t); } catch { windAt = null; }
+  const path = buildPath(fx, F.dest, cls, windAt), sigma = corridor(path, fx);
   const t0 = fx.t, M = path.M, now = Date.now();
   // sampling plan: every 5 min for the next 4 h, then every 10 min; centre + both sides of the corridor
   const m0 = clamp(Math.floor((now - t0) / MIN) - 5, 0, M - 1), ms = [];
@@ -504,7 +547,8 @@ async function compute() {
   const L = F.origin && F.dest ? hav(F.origin.lat, F.origin.lon, F.dest.lat, F.dest.lon) : null;
   F.D = {
     at: now, t0, M, arr: path.straight ? null : t0 + (M - 1) * MIN, straight: path.straight,
-    lat: path.lat.map((x) => +x.toFixed(3)), lon: path.lon.map((x) => +x.toFixed(3)), fl: path.fl, ph: path.ph,
+    lat: path.lat.map((x) => +x.toFixed(3)), lon: path.lon.map((x) => +x.toFixed(3)), fl: path.fl, ph: path.ph, gs: path.gs,
+    wind: windAt ? (() => { const m = clamp(Math.round((now - t0) / MIN), 0, M - 1), w = windAt(path.lat[m], path.lon[m]); return { w, along: Math.round(windAlong(w, headingAt(path, m))) }; })() : null,
     dist: path.dist.map((x) => (x == null ? null : Math.round(x))), sig: sigma.map((x) => Math.round(x)), L,
     med, hi, steps, sigmets: smp.sigmets || [], pireps: smp.pireps || [], sources: smp.sources, updated: smp.updated, range: smp.range,
     nc: nc ? { n: ncPts.length, sats: [...new Set(nc.filter((x) => x.sat).map((x) => x.sat))] } : null,
@@ -648,6 +692,8 @@ function renderLadder() {
 
 /* ------------------------------------------------------------------ screens and tabs */
 function showHome() {
+  if (gpsWatch != null) stopGPS(false);
+  if (editMode) endEdit(false);
   F = null; stopTimers();
   $("home").hidden = false; $("flight").hidden = true; $("tabbar").hidden = true;
   document.title = "Turbulence Watch";
@@ -681,7 +727,13 @@ function openFlight(q, url = {}) {
   if (url.from || url.to) st.route = { from: (url.from || "").toUpperCase(), to: (url.to || "").toUpperCase() };
   if (url.dep) { const t = Date.parse(url.dep); if (t) st.dep = t; }
   st.seen = Date.now();
+  if (st.manual && !st.track.some((x) => x[6] === "you" && Math.abs(x[2] - st.manual.t) < 1000)) {
+    st.track.push([st.manual.lat, st.manual.lon, st.manual.t, st.manual.alt ?? null, null, st.manual.trk ?? null, "you"]);
+    st.track.sort((x, y) => x[2] - y[2]);
+  }
   F = { q, key, st, info: st.info, D: st.last, origin: null, dest: null, fix: null };
+  if (gpsWatch != null) stopGPS(false);
+  if (st.gps && navigator.permissions?.query) navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state === "granted" && F?.q === q) startGPS(); }).catch(() => {});
   GP = null; drawn = null;
   $("home").hidden = true; $("flight").hidden = false; $("tabbar").hidden = false;
   $("fTitle").textContent = q; $("fSub").innerHTML = "&nbsp;"; document.title = `${q} · Turbulence Watch`;
@@ -702,9 +754,11 @@ function route() {
 
 /* ------------------------------------------------------------------ refresh cycle */
 const setStatus = (t) => { $("status").textContent = t; };
+let again = false;   // a refresh asked for while one is running (e.g. a new GPS fix or a correction) runs right after it
 async function refresh() {
-  if (!F || busy) return;
-  busy = true; lastTry = Date.now(); errMsg = "";
+  if (!F) return;
+  if (busy) { again = true; return; }
+  busy = true; again = false; lastTry = Date.now(); errMsg = "";
   const q = F.q;
   $("refreshBtn").classList.add("spin");
   setStatus(F.D ? `Updating… (last ${fmtT(F.D.at)})` : "Finding the plane and the latest forecasts…");
@@ -727,6 +781,7 @@ async function refresh() {
     busy = false;
     $("refreshBtn").classList.remove("spin");
     if (F?.q === q) { fitGP(); renderAll(); }
+    if (again && F?.q === q) { again = false; setTimeout(refresh, 50); }
   }
 }
 let timers = [];
@@ -760,11 +815,12 @@ function renderHeader() {
 function renderBanner() {
   const b = $("banner"), fx = F.fix, D = F.D;
   let html = "", info = false;
-  const posBtns = `<div class="btns"><button class="pill" type="button" data-act="dep">Set takeoff time</button><button class="pill gray" type="button" data-act="tap">Tap my position</button></div>`;
+  const gpsBtn = `<button class="pill" type="button" data-act="gps">${gpsWatch != null ? "GPS on" : "Use my GPS"}</button>`;
+  const posBtns = `<div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button><button class="pill gray" type="button" data-act="dep">Set takeoff time</button></div>`;
   if (F.routeWarn === "unknown") html = `<div><b>We couldn't find ${esc(F.q)}'s route.</b> Tell us where it flies and the forecast follows.</div><div class="btns"><button class="pill" type="button" data-act="from">Set departure</button><button class="pill" type="button" data-act="to">Set destination</button></div>`;
   else if (F.routeWarn === "mismatch") html = `<div><b>The route looks wrong.</b> The flight database says ${esc(apCode(F.origin))} → ${esc(apCode(F.dest))}, but the plane isn't on that path. Set the right one.</div><div class="btns"><button class="pill" type="button" data-act="to">Set destination</button><button class="pill gray" type="button" data-act="from">Set departure</button></div>`;
-  else if (fx?.kind === "unknown") { info = true; html = `<div><b>Can't see ${esc(F.q)} right now.</b> If you're already flying (planes vanish from trackers over oceans), set your takeoff time or tap where you are. Until then this assumes takeoff now.</div>${posBtns}`; }
-  else if (fx?.kind === "dr" && Date.now() - fx.t > 20 * MIN) { info = true; html = `<div><b>Last seen ${fmtT(fx.t)}</b> (${esc(fx.src)}). Trackers lose planes over oceans, so your position is estimated along the path. If you know better, tap where you are.</div><div class="btns"><button class="pill gray" type="button" data-act="tap">Tap my position</button></div>`; }
+  else if (fx?.kind === "unknown") { info = true; html = `<div><b>Can't see ${esc(F.q)} right now.</b> Flight trackers lose planes over oceans. If you're flying, turn on your phone's GPS (works in airplane mode at a window seat), correct the position on the map, or set your takeoff time. Until then this assumes takeoff now.</div>${posBtns}`; }
+  else if ((fx?.kind === "dr" || fx?.kind === "takeoff") && Date.now() - fx.t > 20 * MIN) { info = true; html = `<div><b>${fx.kind === "takeoff" ? `Estimated from your ${fmtT(fx.t)} takeoff.` : `Last seen ${fmtT(fx.t)} (${esc(fx.src)}).`}</b> Flight trackers lose planes over oceans, so the position is dead-reckoned with the forecast winds. Your phone's GPS fixes that; so does dragging the plane to where the seatback map shows it.</div><div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button></div>`; }
   else if (fx?.kind === "landed") { info = true; html = `<div><b>Landed</b> at ${esc(apCity(F.dest))}.</div>`; }
   b.hidden = !html; b.className = "banner" + (info ? " info" : ""); b.innerHTML = html;
   b.querySelectorAll("[data-act]").forEach((x) => x.addEventListener("click", () => act(x.dataset.act)));
@@ -772,14 +828,15 @@ function renderBanner() {
 function act(a) {
   if (a === "from" || a === "to") openSheet(a);
   else if (a === "dep") { showTab("trip"); setTimeout(() => { $("depRow").scrollIntoView({ block: "center" }); $("depInput").focus(); }, 60); }
-  else if (a === "tap") startTap();
+  else if (a === "tap") startEdit();
+  else if (a === "gps") gpsToggle();
 }
 
 function renderNow() {
   const D = F.D, fx = F.fix;
   if (!D || D.landed || !D.med) {
     $("hero").innerHTML = D?.landed ? `<div class="lvl"><i class="dot" style="background:var(--green)"></i><span>Landed</span></div><div class="small">Welcome to ${esc(apCity(F.dest))}.</div>` : `<div class="lvl"><i class="dot" style="background:var(--label3)"></i><span>${busy ? "Loading" : "No forecast yet"}</span></div><div class="small">${busy ? "Getting the plane's position and the latest forecasts." : esc(errMsg || "Set the route in the Flight tab.")}</div>`;
-    $("tiles").innerHTML = ""; $("stats").innerHTML = ""; $("hist").innerHTML = ""; $("feelBox").hidden = true;
+    $("tiles").innerHTML = ""; $("stats").innerHTML = ""; $("hist").innerHTML = ""; $("feelBox").hidden = true; $("posBtns").hidden = true;
     return;
   }
   const flying = airborneKind(D.fixKind), el = Math.max(0, nowMin()), at = (m) => fmtT(D.t0 + m * MIN);
@@ -804,12 +861,13 @@ function renderNow() {
   const tiles = [];
   const arr = D.arr;
   if (flying) {
-    const pos = { live: "Live", dr: "Estimated", manual: "Your tap", takeoff: "Estimated" }[D.fixKind] || "—";
-    const sub = !fx ? "" : fx.kind === "live" ? `${fmtT(fx.t)} · ${fx.src}` : fx.kind === "dr" ? `last seen ${fmtT(fx.t)} · ${fx.src}` : fx.kind === "manual" ? `your tap at ${fmtT(fx.t)}` : `from takeoff at ${fmtT(fx.t)}`;
+    const pos = { live: "Live", dr: "Estimated", manual: fx && Date.now() - fx.t < 10 * MIN ? "Your fix" : "Estimated", takeoff: "Estimated" }[D.fixKind] || "—";
+    const sub = !fx ? "" : fx.kind === "live" ? `${fmtT(fx.t)} · ${fx.src}` : fx.kind === "dr" ? `last seen ${fmtT(fx.t)} · ${fx.src}` : fx.kind === "manual" ? `from your fix at ${fmtT(fx.t)}` : `from takeoff at ${fmtT(fx.t)}`;
     tiles.push(["Position", pos, sub]);
     const alt = fx?.alt && fx.alt > 1000 ? Math.round(fx.alt / 100) * 100 : D.fl[clamp(Math.round(el), 0, D.M - 1)] * 100;
     tiles.push(["Altitude", alt ? alt.toLocaleString("en-US") + " ft" : "—", fx?.trk != null ? `heading ${Math.round(fx.trk)}°` : ""]);
-    tiles.push(["Ground speed", fx?.gs ? `${Math.round(fx.gs)} km/h` : "—", fx?.gs ? `${Math.round(fx.gs / 1.852)} kt` : ""]);
+    const gsNow = fx?.kind === "live" && fx.gs ? fx.gs : D.gs ? D.gs[clamp(Math.round(el), 0, D.M - 1)] : null;
+    tiles.push(["Ground speed", gsNow ? `${fx?.kind === "live" && fx.gs ? "" : "~"}${Math.round(gsNow)} km/h` : "—", D.wind && Math.abs(D.wind.along) >= 10 ? `${Math.abs(D.wind.along)} km/h ${D.wind.along > 0 ? "tailwind" : "headwind"}` : gsNow ? `${Math.round(gsNow / 1.852)} kt` : ""]);
   } else {
     tiles.push(["Takeoff", fmtT(D.t0) + dayTag(D.t0), D.fixKind === "unknown" ? "assumed now" : "your setting"]);
     tiles.push(["Flight time", arr ? dur((arr - D.t0) / MIN) : "—", "estimated"]);
@@ -817,6 +875,7 @@ function renderNow() {
   }
   tiles.push(["Landing", arr ? fmtT(arr) + dayTag(arr) : "—", arr && F.dest?.tz ? `${fmtT(arr, F.dest.tz)} in ${apCity(F.dest)}` : arr ? `in ${dur((arr - Date.now()) / MIN)}` : "route unknown"]);
   $("tilesHdr").textContent = flying ? "Right now" : "Your flight";
+  $("posBtns").hidden = !flying;
   $("tiles").innerHTML = tiles.map(([a, b, c]) => `<div class="tile"><span>${esc(a)}</span><b>${esc(b)}</b><small>${esc(c) || "&nbsp;"}</small></div>`).join("");
   renderHist();
   renderFelt();
@@ -902,7 +961,8 @@ function renderTrip() {
   $("depRow").hidden = flying;
   $("depLabel").textContent = F.fix?.kind === "planned" || F.fix?.kind === "unknown" || F.fix?.kind === "ground" ? "Takeoff (planned)" : "Took off at";
   $("depInput").value = F.st.dep ? localInput(F.st.dep) : "";
-  $("vPos").textContent = F.st.manual ? `set ${fmtT(F.st.manual.t)}` : "";
+  $("vPos").textContent = F.st.manual ? `last ${fmtT(F.st.manual.t)}` : "";
+  $("posRows").hidden = !(D && !D.landed && D.lat);
   $("selTz").value = TZ;
   $("routeNote").textContent = F.routeSrc === "you" ? "Route set by you. Clear both airports to go back to the flight database." : F.routeSrc ? `Route from the ${F.routeSrc.replace(" (reversed)", "")} flight database${F.routeSrc.includes("reversed") ? ", reversed to match the plane" : ""}. Fix it here if it's wrong.` : "Set the route so the forecast can follow it.";
   // data card
@@ -914,6 +974,7 @@ function renderTrip() {
     dl.push(["Official WAFS forecast", run("wafs")], ["ECMWF IFS", run("ifs")], ["NOAA GFS", run("gfs")], ["ECMWF AI (AIFS)", run("aifs")]);
     dl.push(["Fields published", fmtT(Date.parse(D.updated)) + dayTag(Date.parse(D.updated))]);
   }
+  if (D?.wind) dl.push(["Cruise wind here", `${Math.round(Math.hypot(D.wind.w[0], D.wind.w[1]) * 3.6)} km/h, ${Math.abs(D.wind.along)} km/h ${D.wind.along >= 0 ? "tailwind" : "headwind"} (GFS)`]);
   if (D?.nc) dl.push(["Satellite storms", D.nc.sats.length ? D.nc.sats.join(", ") : "no coverage on this stretch"]);
   $("dataList").innerHTML = dl.map(([a, b]) => `<div class="row"><span class="k">${a}</span><span class="v">${b}</span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2)">Loading…</span></div>`;
 
@@ -987,7 +1048,7 @@ function defineCloudLayer() {
     },
   });
 }
-let MAP = null, drawn = null, tapMode = false;
+let MAP = null, drawn = null, editMode = false, editLL = null;
 const LAYERS = store.get("tw:layers", { turb: true, clouds: true, storms: true, warn: true });
 function initMap() {
   if (MAP || !window.L || $("flight").hidden) return;
@@ -1007,21 +1068,126 @@ function initMap() {
   };
   for (const [k, g] of Object.entries(groups)) if (k === "route" || LAYERS[k]) g.addTo(map);
   map.createPane("planePane").style.zIndex = 650;
+  // position tools: phone GPS and "correct position" (drag the plane / tap where you are)
+  const Tools = L.Control.extend({
+    onAdd() {
+      const d = L.DomUtil.create("div", "maptools2");
+      d.innerHTML = `<button type="button" id="mGps" aria-label="Use my phone's GPS" title="Use my phone's GPS"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/></svg></button><button type="button" id="mEdit" aria-label="Correct the plane's position" title="Correct the plane's position"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.6-6.5-11A6.5 6.5 0 0 1 18.5 10c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></svg></button>`;
+      L.DomEvent.disableClickPropagation(d);
+      d.querySelector("#mGps").addEventListener("click", () => gpsToggle());
+      d.querySelector("#mEdit").addEventListener("click", () => (editMode ? endEdit(false) : startEdit()));
+      return d;
+    },
+  });
+  new Tools({ position: "topleft" }).addTo(map);
   MAP = { map, groups, plane: null, view: store.get("tw:view", "30"), turbKey: null };
   map.on("click", (e) => {
-    if (!tapMode || !F) return;
-    tapMode = false; $("mapWrap").classList.remove("tapmode");
-    const cls = classFor(), ll = e.latlng.wrap();
-    F.st.manual = { lat: ll.lat, lon: ll.lng, t: Date.now(), alt: (F.D?.fl?.[0] || cls.fl) * 100, gs: cls.v, trk: F.dest ? brg(ll.lat, ll.lng, F.dest.lat, F.dest.lon) : null };
-    saveF(); MAP.view = "30"; refresh();
+    if (!editMode || !F) return;
+    editLL = e.latlng;
+    updatePlane();
   });
   document.querySelectorAll("#layerChips .chip").forEach((b) => b.setAttribute("aria-pressed", String(!!LAYERS[b.dataset.l])));
   setView(MAP.view, false);
+  renderGPS();
 }
-function startTap() {
-  tapMode = true; showTab("map");
-  setTimeout(() => $("mapWrap").classList.add("tapmode"), 80);
+
+/* correcting the position by hand: ground truth that re-anchors the path */
+function startEdit() {
+  if (!F?.D || F.D.landed || !F.D.lat) { setStatus("Set the route first, then correct the position."); return; }
+  editMode = true; editLL = null;
+  if (tab !== "map") showTab("map");
+  requestAnimationFrame(() => {
+    initMap();
+    if (!MAP) return;
+    $("editBar").hidden = false; $("mapWrap").classList.add("editing");
+    const [la, lo] = planeLL();
+    editLL = L.latLng(la, unwrapTo(lo, MAP.lonRef ?? lo));
+    if (MAP.map.getZoom() < 5) MAP.map.setView(editLL, 6);
+    updatePlane();
+    renderGPS();
+  });
 }
+function endEdit(apply) {
+  const ll = editLL;
+  editMode = false; editLL = null;
+  $("editBar").hidden = true; $("mapWrap").classList.remove("editing");
+  if (apply && ll) { const w = ll.wrap(); setManual(w.lat, w.lng); }
+  else updatePlane();
+  renderGPS();
+}
+function setManual(lat, lon) {
+  if (!F) return;
+  const now = Date.now(), cls = classFor();
+  const alt = F.fix?.alt > 20000 ? F.fix.alt : (F.D?.fl?.[clamp(Math.round(nowMin()), 0, (F.D?.M || 1) - 1)] || cls.fl) * 100;
+  const trk = F.dest ? brg(lat, lon, F.dest.lat, F.dest.lon) : F.fix?.trk ?? null;
+  F.st.manual = { lat, lon, t: now, alt, gs: null, trk };
+  F.st.track.push([+lat.toFixed(4), +lon.toFixed(4), now, Math.round(alt), null, trk == null ? null : Math.round(trk), "you"]);
+  F.st.track.sort((a, b) => a[2] - b[2]);
+  saveF(); drawn = null;
+  if (MAP) { MAP.turbKey = null; MAP.view = "30"; }
+  setStatus("Position set. Recomputing the path from there…");
+  refresh().then(() => { if (MAP && tab === "map") setView("30"); });
+}
+// distance to go, as shown on the seatback map: puts the plane on the projected path at that distance
+function setByDistance(km) {
+  const D = F?.D;
+  if (!D?.dist || !F.dest || !(km > 0)) return;
+  let best = -1, bd = Infinity;
+  for (let m = 0; m < D.M; m++) { const d = D.dist[m]; if (d != null && Math.abs(d - km) < bd) { bd = Math.abs(d - km); best = m; } }
+  if (best >= 0) setManual(D.lat[best], D.lon[best]);
+}
+
+/* the phone's own GPS: works in airplane mode at a window seat, and is the best position source over oceans */
+let gpsWatch = null, gpsMsg = "", gpsLastRefresh = 0;
+function gpsToggle() { if (gpsWatch != null) stopGPS(); else startGPS(); }
+function startGPS() {
+  if (!("geolocation" in navigator)) { gpsMsg = "This browser can't read your location."; renderGPS(); return; }
+  if (gpsWatch != null) return;
+  gpsMsg = "Looking for a GPS fix… (works best at a window seat)";
+  gpsWatch = navigator.geolocation.watchPosition(onGPS, onGPSErr, { enableHighAccuracy: true, maximumAge: 15000, timeout: 120000 });
+  if (F) { F.st.gps = true; saveF(); }
+  renderGPS();
+}
+function stopGPS(save = true) {
+  if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch);
+  gpsWatch = null; gpsMsg = "";
+  if (F && save) { F.st.gps = false; saveF(); }
+  renderGPS();
+}
+function onGPS(pos) {
+  if (!F) return;
+  const c = pos.coords, t = pos.timestamp || Date.now();
+  if (!(c.accuracy <= 5000)) { gpsMsg = `No GPS fix yet (only within ${Math.round(c.accuracy / 1000)} km). Sit by a window, or correct the position by hand.`; renderGPS(); return; }
+  const spd = c.speed != null && c.speed >= 0 ? c.speed * 3.6 : null, alt = c.altitude != null ? c.altitude * 3.28084 : null;
+  const flying = (spd != null && spd > 200) || (alt != null && alt > 10000) || (spd == null && alt == null);
+  if (!flying) { gpsMsg = `GPS works, but you don't seem to be flying yet${spd != null ? ` (${Math.round(spd)} km/h)` : ""}.`; renderGPS(); return; }
+  const tr = F.st.track, last = tr[tr.length - 1];
+  gpsMsg = `GPS fix ${fmtT(t)}, within ${c.accuracy < 1000 ? Math.round(c.accuracy) + " m" : (c.accuracy / 1000).toFixed(1) + " km"}`;
+  if (!(last && last[6] === "GPS" && t - last[2] < 20e3)) {
+    tr.push([+c.latitude.toFixed(4), +c.longitude.toFixed(4), t, alt != null ? Math.round(alt) : null, spd != null ? Math.round(spd) : null, c.heading != null && !Number.isNaN(c.heading) ? Math.round(c.heading) : null, "GPS"]);
+    saveF();
+  }
+  renderGPS();
+  // re-anchor the path when it has drifted from the GPS, and at most every 3 minutes otherwise
+  const D = F.D;
+  let dev = Infinity;
+  if (D && D.lat) { const m = clamp(Math.round((t - D.t0) / MIN), 0, D.M - 1); dev = hav(D.lat[m], D.lon[m], c.latitude, c.longitude); }
+  if (dev > 20 || Date.now() - gpsLastRefresh > 3 * MIN) { gpsLastRefresh = Date.now(); refresh(); }
+}
+function onGPSErr(e) {
+  gpsMsg = e.code === 1 ? "Location permission is off for this site. Allow it in your browser's settings." : e.code === 3 ? "Still looking for a GPS fix… a window seat helps." : "Location isn't available right now.";
+  if (e.code === 1) { if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; }
+  renderGPS();
+}
+function renderGPS() {
+  const on = gpsWatch != null;
+  const b = document.getElementById("mGps"); if (b) b.classList.toggle("on", on);
+  const e = document.getElementById("mEdit"); if (e) e.classList.toggle("on", editMode);
+  if ($("vGps")) $("vGps").textContent = on ? "On" : "Off";
+  if ($("gpsNote")) { $("gpsNote").textContent = gpsMsg; $("gpsNote").hidden = !gpsMsg; }
+  document.querySelectorAll("[data-act=gps]").forEach((x) => (x.textContent = on ? "GPS on" : "Use my GPS"));
+}
+
 // path in continuous longitudes (no jumps at the date line), from minute a to b
 function pathLL(a, b, step = 1) {
   const D = F.D, out = [];
@@ -1038,10 +1204,15 @@ const planeSvg = (h, est) => `<svg width="34" height="34" viewBox="0 0 24 24" st
 function updatePlane() {
   if (!MAP || !F?.D || F.D.landed || !F.D.lat) return;
   const [la, lo, h] = planeLL(), est = F.fix?.kind !== "live";
-  const ref = MAP.lonRef ?? lo, ll = [la, unwrapTo(lo, ref)];
-  const icon = L.divIcon({ className: "plane", html: planeSvg(h, est) + (est ? `<div class="planeLab" style="position:absolute;left:36px;top:9px">estimated now</div>` : ""), iconSize: [34, 34], iconAnchor: [17, 17] });
-  if (!MAP.plane) MAP.plane = L.marker(ll, { icon, pane: "planePane", interactive: false }).addTo(MAP.groups.route);
-  else { MAP.plane.setLatLng(ll); MAP.plane.setIcon(icon); }
+  const ll = editMode && editLL ? editLL : L.latLng(la, unwrapTo(lo, MAP.lonRef ?? lo));
+  const lab = editMode ? "drag me, or tap where you are" : F.fix?.kind === "manual" && Date.now() - F.fix.t < 10 * MIN ? "your correction" : est ? "estimated now" : "";
+  const icon = L.divIcon({ className: "plane" + (editMode ? " editing" : ""), html: (editMode ? `<div class="ring"></div>` : "") + planeSvg(h, est && !editMode) + (lab ? `<div class="planeLab" style="position:absolute;left:36px;top:9px">${lab}</div>` : ""), iconSize: [34, 34], iconAnchor: [17, 17] });
+  if (MAP.plane && MAP.planeEdit !== editMode) { MAP.plane.remove(); MAP.plane = null; }
+  if (!MAP.plane) {
+    MAP.plane = L.marker(ll, { icon, pane: "planePane", interactive: editMode, draggable: editMode, autoPan: true, keyboard: false }).addTo(MAP.groups.route);
+    MAP.planeEdit = editMode;
+    if (editMode) MAP.plane.on("dragend", () => { editLL = MAP.plane.getLatLng(); });
+  } else { MAP.plane.setLatLng(ll); MAP.plane.setIcon(icon); }
 }
 function drawMap() {
   if (!MAP || !F) return;
@@ -1277,7 +1448,19 @@ $("apQ").addEventListener("input", (e) => searchAp(e.target.value));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("sheet").hidden) closeSheet(); });
 $("selCls").addEventListener("change", (e) => { if (!F) return; F.st.cls = e.target.value; saveF(); if (F.D && !F.D.landed) { F.D.cls = classFor().key; fitGP(); renderAll(); drawn = null; if (MAP) MAP.turbKey = null; } });
 $("depInput").addEventListener("change", (e) => { if (!F) return; const t = e.target.value ? new Date(e.target.value).getTime() : null; F.st.dep = Number.isFinite(t) ? t : null; F.st.manual = null; saveF(); drawn = null; if (MAP) MAP.turbKey = null; refresh(); });
-$("tapPos").addEventListener("click", () => startTap());
+$("editPos").addEventListener("click", () => startEdit());
+$("gpsRow").addEventListener("click", () => gpsToggle());
+$("nGps").addEventListener("click", () => gpsToggle());
+$("nEdit").addEventListener("click", () => startEdit());
+$("editCancel").addEventListener("click", () => endEdit(false));
+$("editSet").addEventListener("click", () => endEdit(true));
+$("togoInput").addEventListener("change", (e) => {
+  const v = parseFloat(String(e.target.value).replace(",", "."));
+  if (!(v > 0)) return;
+  const u = $("togoUnit").value, km = u === "mi" ? v * 1.609344 : u === "nm" ? v * 1.852 : v;
+  e.target.value = ""; e.target.blur();
+  setByDistance(km);
+});
 $("selTz").addEventListener("change", (e) => { TZ = e.target.value; store.set("tw:tz", TZ); drawn = null; renderAll(); });
 $("selTheme").value = store.get("tw:theme", "");
 $("selTheme").addEventListener("change", (e) => { store.set("tw:theme", e.target.value); applyTheme(e.target.value); });

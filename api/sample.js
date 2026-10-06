@@ -1,11 +1,13 @@
 // POST {points: [[lat, lon, time, flightLevel], ...]}  ->  every forecast member at each point and time,
 // plus the official warnings (SIGMET), significant-weather areas (WAFS SIGWX) and pilot reports along the way.
+// POST {points, only: "wind"}  ->  just the cruise-level wind (m/s) at each point, for flight-time estimates.
 import { manifest, grid, getFile } from "../lib/data.js";
 import { send } from "../lib/http.js";
 import { sigmets, pireps, inPoly, nearPoly, km } from "../lib/wx.js";
 import { clamp, nearestFile, bracket, cellOf, maxAround, wafsAt, modelAt } from "../lib/fields.js";
 
-const PRODUCTS = ["wafs340", "wafs390", "cbtop", "gfs1", "gfs2", "ifs1", "ifs2", "aifs1", "aifs2", "conv"];
+const PRODUCTS = ["wafs340", "wafs390", "cbtop", "gfs1", "gfs2", "ifs1", "ifs2", "aifs1", "aifs2", "conv", "windu", "windv"];
+const WIND = ["windu", "windv"];
 const r3 = (x) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 1000) / 1000);
 const parsed = new Map();
 
@@ -29,6 +31,8 @@ export default async function handler(req, res) {
   let body = req.body;
   if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = {}; } }
   const raw = Array.isArray(body?.points) ? body.points.slice(0, 600) : [];
+  const windOnly = body?.only === "wind";
+  const products = windOnly ? WIND : PRODUCTS;
   const pts = raw.map(([lat, lon, t, fl]) => ({ lat: +lat, lon: ((+lon + 540) % 360) - 180, t: typeof t === "number" ? t : Date.parse(t), fl: +fl || 370 }))
     .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon) && Number.isFinite(p.t));
   if (!pts.length) return send(res, 400, { error: "no points" });
@@ -40,19 +44,19 @@ export default async function handler(req, res) {
   const plan = pts.map((p) => {
     const { ta, tb, w } = bracket(m, p.t);
     const files = {};
-    for (const prod of PRODUCTS) files[prod] = [nearestFile(m, prod, ta), nearestFile(m, prod, tb)];
+    for (const prod of products) files[prod] = [nearestFile(m, prod, ta), nearestFile(m, prod, tb)];
     return { ...p, w, files, cell: cellOf(G, p.lat, p.lon) };
   });
   const need = new Set(plan.flatMap((p) => Object.values(p.files).flat()).filter(Boolean));
   const loaded = new Map();
-  const sigP = sigmets().catch(() => null);
+  const sigP = windOnly ? Promise.resolve([]) : sigmets().catch(() => null);
   let la0 = 90, la1 = -90, lo0 = 999, lo1 = -999;
   for (const p of pts) { la0 = Math.min(la0, p.lat); la1 = Math.max(la1, p.lat); }
   { // longitude extent, unwrapped along the path so date-line routes give a narrow box
     let prev = pts[0].lon, acc = prev;
     for (const p of pts) { acc += ((p.lon - prev + 540) % 360) - 180; prev = p.lon; lo0 = Math.min(lo0, acc); lo1 = Math.max(lo1, acc); }
   }
-  const pirP = pireps(Math.max(-90, la0 - 2), lo0 - 2, Math.min(90, la1 + 2), lo1 + 2, 3).catch(() => []);
+  const pirP = windOnly ? Promise.resolve([]) : pireps(Math.max(-90, la0 - 2), lo0 - 2, Math.min(90, la1 + 2), lo1 + 2, 3).catch(() => []);
   await Promise.all([...need].map(async (n) => { try { loaded.set(n, await grid(n)); } catch { /* missing grid */ } }));
 
   const tval = (p, prod, rad, sc, zeroIsMissing = true) => {
@@ -62,6 +66,10 @@ export default async function handler(req, res) {
     if (a == null) return b; if (b == null) return a;
     return a * (1 - p.w) + b * p.w;
   };
+
+  const ws = m.scale.wind_ms ?? 1, wo = m.scale.wind_offset ?? -128;
+  const wind = (p) => { const u = tval(p, "windu", 0, ws, false), v = tval(p, "windv", 0, ws, false); return u == null || v == null ? null : [Math.round(u + wo), Math.round(v + wo)]; };
+  if (windOnly) return send(res, 200, { updated: m.updated, points: plan.map((p) => ({ w: wind(p) })) });
 
   // significant-weather chart areas, nearest chart time
   const swTimes = Object.keys(m.files.sigwx_TURB || {}).map((k) => [Date.parse(k), m.files.sigwx_TURB[k], (m.files.sigwx_CB || {})[k]]);
@@ -76,7 +84,7 @@ export default async function handler(req, res) {
     const o = {
       wafs: r3(wafsAt(tval(p, "wafs340", 1, e), tval(p, "wafs390", 1, e), p.fl)),
       ifs: r3(mdl("ifs")), gfs: r3(mdl("gfs")), aifs: r3(mdl("aifs")),
-      conv: r3(tval(p, "conv", 0, e)), cb: r3(tval(p, "cbtop", 1, m.scale.cbtop_kft, false)),
+      conv: r3(tval(p, "conv", 0, e)), cb: r3(tval(p, "cbtop", 1, m.scale.cbtop_kft, false)), w: wind(p),
     };
     // SIGMETs in force when the plane gets there (1 h early / 30 min late margin) at its level, inside or within 40 km
     const hits = [];

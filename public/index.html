@@ -63,6 +63,7 @@
       </div>
       <div class="hdr" id="tilesHdr">Right now</div>
       <div class="tiles" id="tiles"></div>
+      <div class="btns posbtns" id="posBtns" hidden><button class="pill gray" type="button" id="nGps" data-act="gps">Use my GPS</button><button class="pill gray" type="button" id="nEdit">Correct position</button></div>
 
       <div id="feelBox">
         <div class="hdr">How does it feel?</div>
@@ -101,7 +102,9 @@
           <button type="button" class="chip" data-l="storms" aria-pressed="true">Storm cells</button>
           <button type="button" class="chip" data-l="warn" aria-pressed="true">Warnings</button>
         </div>
-        <div id="mapWrap"><div id="map" role="application" aria-label="Map of your flight"></div></div>
+        <div id="mapWrap"><div id="map" role="application" aria-label="Map of your flight"></div>
+          <div class="editbar" id="editBar" hidden><span>Drag the plane, or tap where you are</span><button type="button" class="pill gray" id="editCancel">Cancel</button><button type="button" class="pill" id="editSet">Set here</button></div>
+        </div>
         <div class="legend">
           <span><i class="sw" style="background:#4fd1ff;height:4px"></i>Flown</span>
           <span><i class="sw" style="border-top:3px dashed #ffd60a;height:0"></i>Path, coloured by jolts</span>
@@ -133,10 +136,19 @@
         <button class="row" type="button" id="setTo"><span class="k">To</span><span class="v"><span id="vTo">—</span><span class="chev">›</span></span></button>
         <label class="row"><span class="k">Aircraft</span><select id="selCls" aria-label="Aircraft size"></select></label>
         <label class="row" id="depRow"><span class="k" id="depLabel">Takeoff</span><input id="depInput" type="datetime-local" aria-label="Takeoff time"></label>
-        <button class="row" type="button" id="tapPos"><span class="k">Set my position on the map</span><span class="v"><span id="vPos"></span><span class="chev">›</span></span></button>
         <label class="row"><span class="k">Show times in</span><select id="selTz" aria-label="Time zone"><option value="phone">Phone time</option><option value="origin">Departure city</option><option value="dest">Arrival city</option><option value="utc">UTC</option></select></label>
       </div>
       <div class="foot" id="routeNote">Flight-number databases are sometimes out of date. If the route is wrong, fix it here.</div>
+      <div id="posRows" hidden>
+        <div class="hdr">Where you are</div>
+        <div class="card">
+          <button class="row" type="button" id="gpsRow"><span class="k">Use my phone's GPS<br><small>Works in airplane mode, best at a window seat</small></span><span class="v"><span id="vGps">Off</span><span class="chev">›</span></span></button>
+          <button class="row" type="button" id="editPos"><span class="k">Correct the position on the map<br><small>Drag the plane to where the seatback map shows it</small></span><span class="v"><span id="vPos"></span><span class="chev">›</span></span></button>
+          <label class="row"><span class="k">Distance to go<br><small>From the seatback map</small></span><span class="v togo"><input id="togoInput" type="text" inputmode="decimal" placeholder="e.g. 5230" aria-label="Distance to destination"><select id="togoUnit" aria-label="Unit"><option value="km">km</option><option value="mi">mi</option><option value="nm">nm</option></select></span></label>
+        </div>
+        <div class="foot" id="gpsNote" hidden></div>
+        <div class="foot">Each of these is ground truth: the path, timings and forecast are recomputed from it, and it calibrates the ground speed used to estimate where you are next.</div>
+      </div>
       <div class="hdr">Data</div>
       <div class="card" id="dataList"></div>
     </section>
