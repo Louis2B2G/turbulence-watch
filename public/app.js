@@ -733,7 +733,12 @@ function openFlight(q, url = {}) {
   }
   F = { q, key, st, info: st.info, D: st.last, origin: null, dest: null, fix: null };
   if (gpsWatch != null) stopGPS(false);
-  if (st.gps && navigator.permissions?.query) navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state === "granted" && F?.q === q) startGPS(); }).catch(() => {});
+  // you turned GPS on for this flight before: turn it back on after a reload (asks again only if the browser forgot the permission)
+  if (st.gps) {
+    const resume = () => { if (F?.q === q) startGPS(); };
+    if (navigator.permissions?.query) navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state !== "denied") resume(); }).catch(resume);
+    else resume();
+  }
   GP = null; drawn = null;
   $("home").hidden = true; $("flight").hidden = false; $("tabbar").hidden = false;
   $("fTitle").textContent = q; $("fSub").innerHTML = "&nbsp;"; document.title = `${q} · Turbulence Watch`;
