@@ -62,7 +62,7 @@ That's it. The functions read the data branch of whichever repo Vercel deployed 
 |---|---|---|
 | `DATA_REPO` | the deployed repo | read forecast fields from another repo (`owner/name`) |
 | `DATA_BRANCH` | `data` | branch with the fields |
-| `GITHUB_TOKEN` | none | needed only if the data repo is private |
+| `DATA_TOKEN` | none | GitHub token with read access, only if the data repo is private |
 
 GitHub disables scheduled workflows in public repos after 60 days without activity; re-enable it from the Actions tab if that happens.
 
