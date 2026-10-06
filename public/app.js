@@ -824,8 +824,8 @@ function renderBanner() {
   const posBtns = `<div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button><button class="pill gray" type="button" data-act="dep">Set takeoff time</button></div>`;
   if (F.routeWarn === "unknown") html = `<div><b>We couldn't find ${esc(F.q)}'s route.</b> Tell us where it flies and the forecast follows.</div><div class="btns"><button class="pill" type="button" data-act="from">Set departure</button><button class="pill" type="button" data-act="to">Set destination</button></div>`;
   else if (F.routeWarn === "mismatch") html = `<div><b>The route looks wrong.</b> The flight database says ${esc(apCode(F.origin))} → ${esc(apCode(F.dest))}, but the plane isn't on that path. Set the right one.</div><div class="btns"><button class="pill" type="button" data-act="to">Set destination</button><button class="pill gray" type="button" data-act="from">Set departure</button></div>`;
-  else if (fx?.kind === "unknown") { info = true; html = `<div><b>Can't see ${esc(F.q)} right now.</b> Flight trackers lose planes over oceans. If you're flying, turn on your phone's GPS (works in airplane mode at a window seat), correct the position on the map, or set your takeoff time. Until then this assumes takeoff now.</div>${posBtns}`; }
-  else if ((fx?.kind === "dr" || fx?.kind === "takeoff") && Date.now() - fx.t > 20 * MIN) { info = true; html = `<div><b>${fx.kind === "takeoff" ? `Estimated from your ${fmtT(fx.t)} takeoff.` : `Last seen ${fmtT(fx.t)} (${esc(fx.src)}).`}</b> Flight trackers lose planes over oceans, so the position is dead-reckoned with the forecast winds. Your phone's GPS fixes that; so does dragging the plane to where the seatback map shows it.</div><div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button></div>`; }
+  else if (fx?.kind === "unknown") { info = true; html = `<div><b>Can't see ${esc(F.q)} right now.</b> Flight trackers lose planes over oceans. If you're flying, turn on your phone's GPS (works in airplane mode at a window seat), correct the position on the map, or set your takeoff time. Until then this assumes takeoff now.</div>${posBtns}<div class="gpsstat"${gpsWatch != null || gpsMsg ? "" : " hidden"}>${gpsLine()}</div>`; }
+  else if ((fx?.kind === "dr" || fx?.kind === "takeoff") && Date.now() - fx.t > 20 * MIN) { info = true; html = `<div><b>${fx.kind === "takeoff" ? `Estimated from your ${fmtT(fx.t)} takeoff.` : `Last seen ${fmtT(fx.t)} (${esc(fx.src)}).`}</b> Flight trackers lose planes over oceans, so the position is dead-reckoned with the forecast winds. Your phone's GPS fixes that; so does dragging the plane to where the seatback map shows it.</div><div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button></div><div class="gpsstat"${gpsWatch != null || gpsMsg ? "" : " hidden"}>${gpsLine()}</div>`; }
   else if (fx?.kind === "landed") { info = true; html = `<div><b>Landed</b> at ${esc(apCity(F.dest))}.</div>`; }
   b.hidden = !html; b.className = "banner" + (info ? " info" : ""); b.innerHTML = html;
   b.querySelectorAll("[data-act]").forEach((x) => x.addEventListener("click", () => act(x.dataset.act)));
@@ -1165,12 +1165,13 @@ function setByDistance(km) {
 }
 
 /* the phone's own GPS: works in airplane mode at a window seat, and is the best position source over oceans */
-let gpsWatch = null, gpsMsg = "", gpsLastRefresh = 0;
+let gpsWatch = null, gpsMsg = "", gpsLastRefresh = 0, gpsOnAt = 0, gpsGot = 0;
 function gpsToggle() { if (gpsWatch != null) stopGPS(); else startGPS(); }
 function startGPS() {
   if (!("geolocation" in navigator)) { gpsMsg = "This browser can't read your location."; renderGPS(); return; }
   if (gpsWatch != null) return;
-  gpsMsg = "Looking for a GPS fix… (works best at a window seat)";
+  gpsMsg = "Asking your phone for its location… (works best at a window seat)";
+  gpsOnAt = Date.now(); gpsGot = 0;
   gpsWatch = navigator.geolocation.watchPosition(onGPS, onGPSErr, { enableHighAccuracy: true, maximumAge: 15000, timeout: 120000 });
   if (F) { F.st.gps = true; saveF(); }
   renderGPS();
@@ -1184,12 +1185,19 @@ function stopGPS(save = true) {
 function onGPS(pos) {
   if (!F) return;
   const c = pos.coords, t = pos.timestamp || Date.now();
-  if (!(c.accuracy <= 5000)) { gpsMsg = `No GPS fix yet (only within ${Math.round(c.accuracy / 1000)} km). Sit by a window, or correct the position by hand.`; renderGPS(); return; }
+  if (!(c.accuracy <= 25000)) { gpsMsg = `Your phone only knows roughly where it is (within ${Math.round(c.accuracy / 1000)} km), not enough to place the plane. Sit by a window; on iPhone also check Settings → Privacy & Security → Location Services → Safari Websites → Precise Location.`; renderGPS(); return; }
   const spd = c.speed != null && c.speed >= 0 ? c.speed * 3.6 : null, alt = c.altitude != null ? c.altitude * 3.28084 : null;
-  const flying = (spd != null && spd > 200) || (alt != null && alt > 10000) || (spd == null && alt == null);
-  if (!flying) { gpsMsg = `GPS works, but you don't seem to be flying yet${spd != null ? ` (${Math.round(spd)} km/h)` : ""}.`; renderGPS(); return; }
+  const flying = (spd != null && spd > 200) || (alt != null && alt > 10000) || (spd == null && alt == null) || (spd == null && alt != null && alt > 3000);
+  if (!flying) { gpsMsg = `Your phone has a location, but it says you're not flying${spd != null ? ` (${Math.round(spd)} km/h` + (alt != null ? `, ${Math.round(alt).toLocaleString("en-US")} ft)` : ")") : ""}.`; renderGPS(); return; }
+  // a plane can't jump: a fix must be reachable from the last known position at airliner speed (phones sometimes guess from the plane's Wi-Fi)
+  const ref = lastKnown();
+  if (ref && t > ref.t) {
+    const d = hav(ref.lat, ref.lon, c.latitude, c.longitude), hrs = (t - ref.t) / HOUR;
+    if (d > 150 + 1300 * hrs) { gpsMsg = `Ignored a location ${Math.round(d).toLocaleString("en-US")} km from the last known position: a plane can't get there that fast, so your phone is probably guessing from the Wi-Fi. A window seat gives real GPS.`; renderGPS(); return; }
+  }
+  gpsGot = Date.now();
   const tr = F.st.track, last = tr[tr.length - 1];
-  gpsMsg = `GPS fix ${fmtT(t)}, within ${c.accuracy < 1000 ? Math.round(c.accuracy) + " m" : (c.accuracy / 1000).toFixed(1) + " km"}`;
+  gpsMsg = `Fix ${fmtT(t)}, within ${c.accuracy < 1000 ? Math.round(c.accuracy) + " m" : (c.accuracy / 1000).toFixed(1) + " km"}${spd != null ? `, ${Math.round(spd)} km/h` : ""}${alt != null ? `, ${Math.round(alt / 100) * 100} ft` : ""}`;
   if (!(last && last[6] === "GPS" && t - last[2] < 20e3)) {
     tr.push([+c.latitude.toFixed(4), +c.longitude.toFixed(4), t, alt != null ? Math.round(alt) : null, spd != null ? Math.round(spd) : null, c.heading != null && !Number.isNaN(c.heading) ? Math.round(c.heading) : null, "GPS"]);
     saveF();
@@ -1201,8 +1209,17 @@ function onGPS(pos) {
   if (D && D.lat) { const m = clamp(Math.round((t - D.t0) / MIN), 0, D.M - 1); dev = hav(D.lat[m], D.lon[m], c.latitude, c.longitude); }
   if (dev > 20 || Date.now() - gpsLastRefresh > 3 * MIN) { gpsLastRefresh = Date.now(); refresh(); }
 }
+function lastKnown() {   // newest trusted position: ADS-B, GPS or a correction
+  const tr = F.st.track, last = tr[tr.length - 1], p = F.info?.position;
+  let r = last ? { lat: last[0], lon: last[1], t: last[2] } : null;
+  if (p) { const t = Date.parse(p.t); if (!r || t > r.t) r = { lat: p.lat, lon: p.lon, t }; }
+  return r;
+}
 function onGPSErr(e) {
-  gpsMsg = e.code === 1 ? "Location permission is off for this site. Allow it in your browser's settings." : e.code === 3 ? "Still looking for a GPS fix… a window seat helps." : "Location isn't available right now.";
+  const mins = Math.round((Date.now() - gpsOnAt) / MIN);
+  gpsMsg = e.code === 1 ? "Location permission is off for this site. On iPhone: Settings → Privacy & Security → Location Services → Safari Websites → While Using, Precise Location on. Then tap GPS again."
+    : e.code === 3 ? `No fix after ${mins || 2} min. The fuselage blocks GPS away from the windows: hold the phone against a window for a minute, or correct the position by hand.`
+    : "Your phone says location isn't available. Check that Location Services is on (it works in airplane mode).";
   if (e.code === 1) { if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch); gpsWatch = null; }
   renderGPS();
 }
@@ -1213,7 +1230,9 @@ function renderGPS() {
   if ($("vGps")) $("vGps").textContent = on ? "On" : "Off";
   if ($("gpsNote")) { $("gpsNote").textContent = gpsMsg; $("gpsNote").hidden = !gpsMsg; }
   document.querySelectorAll("[data-act=gps]").forEach((x) => (x.textContent = on ? "GPS on" : "Use my GPS"));
+  document.querySelectorAll(".gpsstat").forEach((x) => { x.hidden = !(on || gpsMsg); x.innerHTML = gpsLine(); });
 }
+const gpsLine = () => `<b>GPS:</b> ${esc(gpsMsg || (gpsWatch != null ? "listening…" : "off"))}`;
 
 // path in continuous longitudes (no jumps at the date line), from minute a to b
 function pathLL(a, b, step = 1) {

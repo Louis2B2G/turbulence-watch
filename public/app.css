@@ -82,6 +82,7 @@ input[type=range]{width:100%;accent-color:var(--tint)}
 .banner{background:color-mix(in srgb,var(--orange) 14%,var(--card));border-radius:12px;padding:12px 16px;margin-bottom:12px;font-size:15px;display:flex;flex-direction:column;gap:10px}
 .banner.info{background:color-mix(in srgb,var(--tint) 12%,var(--card))}
 .banner b{font-weight:600}
+.banner .gpsstat{font-size:14px;line-height:1.35;padding:8px 10px;border-radius:10px;background:color-mix(in srgb,var(--label) 6%,transparent)}
 .btns{display:flex;flex-wrap:wrap;gap:8px}
 .pill{border:0;border-radius:999px;background:var(--tint);color:#fff;font:600 15px var(--f);padding:8px 14px;cursor:pointer}
 .pill.gray{background:var(--fill);color:var(--tint)}
