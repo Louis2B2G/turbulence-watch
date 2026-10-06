@@ -53,6 +53,7 @@ jobs:
         run: |
           if [ -f out/.unchanged ]; then echo "No new forecasts; nothing to publish."; exit 0; fi
           cd out
+          echo '{ "git": { "deploymentEnabled": false } }' > vercel.json   # keep Vercel from deploying data commits
           git init -q -b data
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
