@@ -105,17 +105,27 @@
         <div id="mapWrap"><div id="map" role="application" aria-label="Map of your flight"></div>
           <div class="editbar" id="editBar" hidden><span>Drag the plane, or tap where you are</span><button type="button" class="pill gray" id="editCancel">Cancel</button><button type="button" class="pill" id="editSet">Set here</button></div>
         </div>
-        <div class="legend">
-          <span><i class="sw" style="background:#4fd1ff;height:4px"></i>Flown</span>
-          <span><i class="sw" style="border-top:3px dashed #ffd60a;height:0"></i>Path, coloured by jolts</span>
-          <span><i class="sw" style="background:rgba(255,79,216,.3)"></i>80% corridor</span>
-          <span><i class="sw" style="border:1.5px dashed #ffb347"></i>Official warning</span>
-          <span><i class="sw" style="background:rgba(255,214,10,.55)"></i>Forecast light</span>
-          <span><i class="sw" style="background:rgba(255,149,0,.75)"></i>Forecast moderate+</span>
-          <span><i class="sw" style="background:linear-gradient(90deg,#8c8c8c,#fff)"></i>Cloud now (brighter = higher)</span>
-          <span><i class="sw" style="background:#ffd60a;border:1px solid #000;border-radius:50%;width:10px"></i>Pilot report (by intensity)</span>
-          <span><i class="sw" style="border:2px solid #ff3b3b"></i>Storm cell (Meteosat)</span>
-          <span><i class="sw" style="background:#ffd27a"></i>Lightning (Meteosat)</span>
+        <div class="legend2">
+          <div class="lg"><div class="lgh">Your flight</div>
+            <div class="li"><svg viewBox="0 0 36 18"><path transform="translate(9 0) scale(.75)" d="M12 2c.8 0 1.3.9 1.3 2v5.2l7.7 4.6v2l-7.7-2.4v4.4l2.2 1.7V21L12 20l-3.5 1v-1.5l2.2-1.7v-4.4L3 15.8v-2l7.7-4.6V4c0-1.1.5-2 1.3-2z" fill="#4fd1ff" stroke="#062a3a" stroke-width=".8"/></svg><span>You. Bright blue = live position (GPS or tracker), pale = estimated.</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><path d="M2 9h32" stroke="#4fd1ff" stroke-width="3"/></svg><span>Where you've flown</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><path d="M2 9h10" stroke="#34c759" stroke-width="3" stroke-dasharray="5 3"/><path d="M13 9h10" stroke="#ffd60a" stroke-width="3" stroke-dasharray="5 3"/><path d="M24 9h10" stroke="#ff9500" stroke-width="3" stroke-dasharray="5 3"/></svg><span>Where you're heading, coloured by the bumps expected there</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><rect x="2" y="3" width="32" height="12" rx="2" fill="rgba(255,79,216,.25)" stroke="#ff4fd8" stroke-dasharray="3 3"/></svg><span>Where the path will most likely be (8 times in 10)</span></div>
+          </div>
+          <div class="lg"><div class="lgh">Bump colours (path and shading)</div>
+            <div class="scale"><span><i style="background:var(--green)"></i>Smooth<small>under ±0.2 g</small></span><span><i style="background:var(--yellow)"></i>Light<small>±0.2–0.5 g</small></span><span><i style="background:var(--orange)"></i>Moderate<small>±0.5–1 g</small></span><span><i style="background:var(--red)"></i>Severe<small>over ±1 g</small></span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><rect x="2" y="3" width="15" height="12" fill="rgba(255,214,10,.45)"/><rect x="17" y="3" width="17" height="12" fill="rgba(255,149,0,.7)"/></svg><span>Shading: the turbulence forecast for the moment you'll be there</span></div>
+          </div>
+          <div class="lg"><div class="lgh">Live satellite</div>
+            <div class="li"><svg viewBox="0 0 36 18"><path d="M5 9c0-4 5-6 10-5s9-1 12 2 2 8-3 9-9 0-13 0-6-2-6-6z" fill="none" stroke="#ff3b30" stroke-width="2"/><text x="18" y="12.5" text-anchor="middle" font-size="8" font-weight="700" fill="#ffb3a8" font-family="-apple-system,system-ui,sans-serif">−65</text></svg><span>Thunderstorm cell. The number is its cloud-top temperature in °C: colder means taller. −65 is roughly 14 km (46,000 ft) up, above cruising height. Tap a cell for details.</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><path d="M8 10c0-5 6-7 10-5 5-2 11 1 10 5 2 3-2 6-6 5-3 2-9 2-11-1-3 0-4-2-3-4z" fill="#ffe27a"/></svg><span>Lightning in the last few minutes</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><defs><linearGradient id="lgc" x1="0" x2="1"><stop offset="0" stop-color="#7d7d7d"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><rect x="2" y="4" width="32" height="10" rx="5" fill="url(#lgc)"/></svg><span>Clouds, brighter = higher tops</span></div>
+            <div class="lgnote">Storm cells and lightning cover Europe, Africa and the Atlantic (Meteosat).</div>
+          </div>
+          <div class="lg"><div class="lgh">Warnings</div>
+            <div class="li"><svg viewBox="0 0 36 18"><rect x="3" y="3" width="30" height="12" fill="rgba(255,179,71,.12)" stroke="#ffb347" stroke-width="1.5" stroke-dasharray="4 3"/></svg><span>Official warning area for pilots (SIGMET). Tap it to read it.</span></div>
+            <div class="li"><svg viewBox="0 0 36 18"><circle cx="18" cy="9" r="5" fill="#ff9500" stroke="#000"/></svg><span>A pilot's turbulence report, coloured by how bad</span></div>
+          </div>
         </div>
       </div>
       <div class="foot" id="mapMeta">Pinch to zoom. The turbulence layer shows the forecast for the time you'll pass each spot.</div>

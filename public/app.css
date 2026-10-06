@@ -166,3 +166,16 @@ input[type=range]{width:100%;accent-color:var(--tint)}
 .sheet .top button{border:0;background:none;color:var(--tint);font:600 17px var(--f);cursor:pointer}
 .sheet input{font:400 17px var(--f);color:var(--label);background:var(--fill);border:0;border-radius:10px;padding:10px 12px;width:100%}
 .sheet .res{overflow:auto;-webkit-overflow-scrolling:touch;border-radius:12px;background:var(--card)}
+
+/* map legend */
+.legend2{display:grid;grid-template-columns:1fr;gap:4px;padding:6px 16px 14px}
+@media (min-width:600px){.legend2{grid-template-columns:1fr 1fr;column-gap:20px}}
+.lg{padding-top:8px}
+.lgh{font-size:12px;letter-spacing:.02em;text-transform:uppercase;color:var(--label2);margin:4px 0 6px}
+.li{display:flex;align-items:flex-start;gap:10px;font-size:14px;line-height:1.3;color:var(--label);padding:4px 0}
+.li svg{width:36px;height:18px;flex:none;margin-top:1px;border-radius:3px;background:#1b2330}
+.lgnote{font-size:12px;color:var(--label2);margin-top:2px}
+.scale{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:2px 0 6px}
+.scale span{display:flex;flex-direction:column;gap:2px;font-size:13px;font-weight:600;color:var(--label)}
+.scale i{display:block;height:6px;border-radius:3px}
+.scale small{font-weight:400;font-size:11px;color:var(--label2)}

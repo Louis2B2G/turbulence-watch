@@ -1087,13 +1087,35 @@ function initMap() {
   new Tools({ position: "topleft" }).addTo(map);
   MAP = { map, groups, plane: null, view: store.get("tw:view", "30"), turbKey: null };
   map.on("click", (e) => {
-    if (!editMode || !F) return;
-    editLL = e.latlng;
-    updatePlane();
+    if (!F) return;
+    if (editMode) { editLL = e.latlng; updatePlane(); return; }
+    if (LAYERS.storms) stormPopup(e.latlng);
   });
   document.querySelectorAll("#layerChips .chip").forEach((b) => b.setAttribute("aria-pressed", String(!!LAYERS[b.dataset.l])));
   setView(MAP.view, false);
   renderGPS();
+}
+
+// Tap a storm cell: EUMETSAT's Rapidly Developing Thunderstorms product says how tall it is and what stage it's in.
+async function stormPopup(ll) {
+  const lat = ll.lat, lon = wrap(ll.lng);
+  if (hav(0, 0, lat, lon) > 7500) return;   // outside Meteosat's view
+  const z = MAP.map.getZoom(), n = 101, d = 0.5, bufDeg = Math.min(0.5, (14 * 360) / (256 * 2 ** z));
+  const buf = Math.max(2, Math.min(50, Math.round(bufDeg / ((2 * d) / n))));
+  const url = `https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.1.1&request=GetFeatureInfo&layers=msg_fes:rdt&query_layers=msg_fes:rdt&styles=&srs=EPSG:4326&bbox=${(lon - d).toFixed(3)},${(lat - d).toFixed(3)},${(lon + d).toFixed(3)},${(lat + d).toFixed(3)}&width=${n}&height=${n}&format=image/png&info_format=application/json&x=50&y=50&feature_count=1&buffer=${buf}`;
+  let p = null;
+  try { const r = await fetch(url); p = (await r.json()).features?.[0]?.properties || null; } catch { return; }
+  if (!p || p.BTmin == null) return;
+  const topFt = p.CTPressure > 0 ? Math.round((145366.45 * (1 - Math.pow(p.CTPressure / 1013.25, 0.190284))) / 500) * 500 : null;
+  const myFt = F.fix?.alt > 20000 ? F.fix.alt : F.D?.fl ? F.D.fl[clamp(Math.round(nowMin()), 0, F.D.M - 1)] * 100 : null;
+  const ph = String(p.PhaseLife || "").toLowerCase();
+  const stage = ph.includes("trigger") ? "just forming" : ph.includes("grow") ? "growing" : ph.includes("matur") ? "mature" : ph.includes("decay") ? "weakening" : "";
+  const diff = topFt && myFt ? Math.round((topFt - myFt) / 1000) * 1000 : null;
+  const rel = diff == null ? "" : diff >= 1000 ? `, about ${diff.toLocaleString("en-US")} ft above your height` : diff <= -1000 ? `, about ${(-diff).toLocaleString("en-US")} ft below your height` : ", around your height";
+  const html = `<b>Thunderstorm cell</b><br>Coldest cloud top ${Math.round(p.BTmin)} °C${topFt ? `, tops about ${topFt.toLocaleString("en-US")} ft${rel}` : ""}.` +
+    `${stage ? `<br>Stage: ${stage}.` : ""}${p.CRainRate > 0 ? ` Heavy rain inside (~${Math.round(p.CRainRate)} mm/h).` : ""}${p.DTtropoOT != null && p.DTtropoOT > -9000 ? `<br>Overshooting top: a very strong updraft.` : ""}` +
+    `<br><small style="color:var(--label2)">Meteosat storm product, ${p.time ? fmtT(Date.parse(p.time)) : "latest"}. Pilots normally stay 20 nm or more away from cells like this.</small>`;
+  L.popup({ maxWidth: 260 }).setLatLng(ll).setContent(html).openOn(MAP.map);
 }
 
 /* correcting the position by hand: ground truth that re-anchors the path */
