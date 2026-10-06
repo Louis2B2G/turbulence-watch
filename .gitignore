@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.cache/
+out/
+out_prev/
+node_modules/
+.vercel/
+.DS_Store

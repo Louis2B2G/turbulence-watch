@@ -1,0 +1,64 @@
+# Builds the global forecast fields every hour and publishes them to the `data` branch, which the app reads.
+# A build only runs when a new WAFS issue or model run (GFS, ECMWF IFS, ECMWF AIFS) is out, so most runs take a few seconds.
+name: Forecast fields
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if no new forecasts are out
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forecast-fields
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Fetch the previous build
+        run: |
+          if git clone -q --depth 1 --branch data "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" out_prev; then
+            rm -rf out_prev/.git
+          else
+            mkdir -p out_prev
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: python -m pipeline.fields
+        env:
+          TW_FORCE: ${{ inputs.force && '1' || '0' }}
+
+      - name: Publish to the data branch
+        run: |
+          if [ -f out/.unchanged ]; then echo "No new forecasts; nothing to publish."; exit 0; fi
+          cd out
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Forecast fields $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          echo "Published $(ls | wc -l) files, $(du -sh . | cut -f1)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

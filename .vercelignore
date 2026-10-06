@@ -1,0 +1,8 @@
+pipeline/
+requirements.txt
+.github/
+scripts/
+out/
+out_prev/
+.cache/
+docs/

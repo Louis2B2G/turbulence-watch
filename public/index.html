@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Turbulence Watch</title>
+<meta name="description" content="Live turbulence forecast for any flight: where your plane is, what's ahead, and how big the bumps will be, from the official aviation forecasts and live satellite storms.">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Turbulence">
+<meta property="og:title" content="Turbulence Watch">
+<meta property="og:description" content="Live turbulence forecast for any flight.">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== home ===================== -->
+  <section id="home">
+    <header class="nav" style="padding-top:18px">
+      <div><h1>Turbulence</h1><div class="sub">Live forecast for your flight</div></div>
+    </header>
+    <form class="card search" id="searchForm" autocomplete="off">
+      <input id="q" name="q" type="text" inputmode="text" autocapitalize="characters" spellcheck="false" enterkeyhint="go" placeholder="Flight number, e.g. AF556" aria-label="Flight number">
+      <button type="submit">Track</button>
+    </form>
+    <div class="foot">Any airline flight. Works in the air (on the plane's Wi-Fi) or before you board.</div>
+    <div class="hdr" id="recentHdr" hidden>Recent</div>
+    <div class="card" id="recent" hidden></div>
+    <div class="hdr">What you get</div>
+    <div class="card feat">
+      <div class="row"><span class="ic" style="background:var(--tint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg></span><span class="tx">Where you are and where you're headed<small>Live ADS-B position, the projected path with its uncertainty, satellite clouds and storms.</small></span></div>
+      <div class="row"><span class="ic" style="background:var(--orange)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg></span><span class="tx">Every bumpy stretch, with times<small>The official forecasts airlines plan with (ICAO WAFS), checked against ECMWF, NOAA GFS and ECMWF's AI model.</small></span></div>
+      <div class="row"><span class="ic" style="background:var(--green)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 16a8 8 0 1 1 16 0"/><path d="M12 16l4-5"/></svg></span><span class="tx">How big the jolts will be, in g<small>The odds for the next 10 minutes to 3 hours, and what each size feels like.</small></span></div>
+    </div>
+    <div class="foot" style="margin-bottom:20px">Not an operational tool: the crew has weather radar and real-time reports. Your data stays on this device.</div>
+  </section>
+
+  <!-- ===================== flight ===================== -->
+  <section id="flight" hidden>
+    <div class="topbar">
+      <button class="back" id="backBtn" type="button"><svg viewBox="0 0 13 21" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2L2.5 10.5 11 19"/></svg>Flights</button>
+      <div class="acts">
+        <button class="rbtn" id="shareBtn" type="button" aria-label="Share this flight"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7.5 7.5L12 3l4.5 4.5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg></button>
+        <button class="rbtn" id="refreshBtn" type="button" aria-label="Refresh live data"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+      </div>
+    </div>
+    <header class="nav"><div><h1 id="fTitle">—</h1><div class="sub" id="fSub">&nbsp;</div></div></header>
+    <div class="status" id="status" aria-live="polite">Loading…</div>
+    <div class="banner" id="banner" hidden></div>
+
+    <section data-tab="now">
+      <div class="card hero" id="hero" aria-live="polite">
+        <div class="lvl"><i class="dot" style="background:var(--label3)"></i><span>Loading</span></div>
+        <div class="small">Getting the plane's position and the latest forecasts.</div>
+      </div>
+      <div class="hdr" id="tilesHdr">Right now</div>
+      <div class="tiles" id="tiles"></div>
+
+      <div id="feelBox">
+        <div class="hdr">How does it feel?</div>
+        <div class="card pad">
+          <div class="feel" id="feelBtns">
+            <button type="button" data-l="smooth"><i style="background:var(--green)"></i>Smooth</button>
+            <button type="button" data-l="light"><i style="background:var(--yellow)"></i>Light</button>
+            <button type="button" data-l="moderate"><i style="background:var(--orange)"></i>Moderate</button>
+            <button type="button" data-l="severe"><i style="background:var(--red)"></i>Severe</button>
+          </div>
+        </div>
+        <div class="foot" id="feltNote">Tap what you feel. Your reports tune the forecast for the next stretch.</div>
+        <div class="card" id="feltList" style="margin-top:8px" hidden></div>
+      </div>
+
+      <div class="hdr">Biggest jolt in the next <span id="nLabel">30 min</span></div>
+      <div class="card pad" style="display:flex;flex-direction:column;gap:12px">
+        <div class="seg" id="nSeg" role="group" aria-label="Look-ahead window">
+          <button type="button" data-n="10" aria-pressed="false">10 min</button><button type="button" data-n="30" aria-pressed="true">30 min</button><button type="button" data-n="60" aria-pressed="false">1 h</button><button type="button" data-n="120" aria-pressed="false">2 h</button><button type="button" data-n="180" aria-pressed="false">3 h</button>
+        </div>
+        <input type="range" id="nSlider" min="5" max="180" step="5" value="30" aria-label="Look-ahead minutes">
+        <svg class="hist" id="hist" viewBox="0 0 520 220" role="img" aria-label="Distribution of the biggest expected jolt"></svg>
+      </div>
+      <div class="tiles" id="stats" style="margin-top:10px"></div>
+      <div class="foot">"±0.3 g" means for a moment you feel 0.7 to 1.3 times your normal weight. Bars show how likely each size is for the single biggest jolt in the window.</div>
+    </section>
+
+    <section data-tab="map" hidden>
+      <div class="card" style="margin-top:4px">
+        <div class="maptools">
+          <div class="seg" id="scaleSeg" role="group" aria-label="Map scale"><button type="button" data-k="plane" aria-pressed="false">Plane</button><button type="button" data-k="30" aria-pressed="true">30 min</button><button type="button" data-k="120" aria-pressed="false">2 h</button><button type="button" data-k="all" aria-pressed="false">Flight</button></div>
+        </div>
+        <div class="chips" id="layerChips">
+          <button type="button" class="chip" data-l="turb" aria-pressed="true">Turbulence</button>
+          <button type="button" class="chip" data-l="clouds" aria-pressed="true">Clouds</button>
+          <button type="button" class="chip" data-l="storms" aria-pressed="true">Storm cells</button>
+          <button type="button" class="chip" data-l="warn" aria-pressed="true">Warnings</button>
+        </div>
+        <div id="mapWrap"><div id="map" role="application" aria-label="Map of your flight"></div></div>
+        <div class="legend">
+          <span><i class="sw" style="background:#4fd1ff;height:4px"></i>Flown</span>
+          <span><i class="sw" style="border-top:3px dashed #ffd60a;height:0"></i>Path, coloured by jolts</span>
+          <span><i class="sw" style="background:rgba(255,79,216,.3)"></i>80% corridor</span>
+          <span><i class="sw" style="border:1.5px dashed #ffb347"></i>Official warning</span>
+          <span><i class="sw" style="background:rgba(255,214,10,.55)"></i>Forecast light</span>
+          <span><i class="sw" style="background:rgba(255,149,0,.75)"></i>Forecast moderate+</span>
+          <span><i class="sw" style="background:linear-gradient(90deg,#8c8c8c,#fff)"></i>Cloud now (brighter = higher)</span>
+          <span><i class="sw" style="background:#ffd60a;border:1px solid #000;border-radius:50%;width:10px"></i>Pilot report (by intensity)</span>
+          <span><i class="sw" style="border:2px solid #ff3b3b"></i>Storm cell (Meteosat)</span>
+          <span><i class="sw" style="background:#ffd27a"></i>Lightning (Meteosat)</span>
+        </div>
+      </div>
+      <div class="foot" id="mapMeta">Pinch to zoom. The turbulence layer shows the forecast for the time you'll pass each spot.</div>
+    </section>
+
+    <section data-tab="trip" hidden>
+      <div class="hdr">Rest of the flight</div>
+      <div class="card pad"><svg class="tl" id="timeline" viewBox="0 0 360 64" role="img" aria-label="Expected turbulence for the rest of the flight"></svg></div>
+      <div class="card" id="segList" style="margin-top:10px"></div>
+      <div class="hdr">Do the forecasts agree?</div>
+      <div class="card pad" id="agree"></div>
+      <div class="foot">Peak turbulence (EDR) each forecast gives for the bumpy stretches ahead. Bars close together mean high confidence. "Storms" combines forecast storm tops, instability and rain, and live satellite storms.</div>
+      <div class="hdr">Official warnings and pilot reports</div>
+      <div class="card" id="warnList"></div>
+      <div class="hdr">Route and aircraft</div>
+      <div class="card" id="settings">
+        <button class="row" type="button" id="setFrom"><span class="k">From</span><span class="v"><span id="vFrom">—</span><span class="chev">›</span></span></button>
+        <button class="row" type="button" id="setTo"><span class="k">To</span><span class="v"><span id="vTo">—</span><span class="chev">›</span></span></button>
+        <label class="row"><span class="k">Aircraft</span><select id="selCls" aria-label="Aircraft size"></select></label>
+        <label class="row" id="depRow"><span class="k" id="depLabel">Takeoff</span><input id="depInput" type="datetime-local" aria-label="Takeoff time"></label>
+        <button class="row" type="button" id="tapPos"><span class="k">Set my position on the map</span><span class="v"><span id="vPos"></span><span class="chev">›</span></span></button>
+        <label class="row"><span class="k">Show times in</span><select id="selTz" aria-label="Time zone"><option value="phone">Phone time</option><option value="origin">Departure city</option><option value="dest">Arrival city</option><option value="utc">UTC</option></select></label>
+      </div>
+      <div class="foot" id="routeNote">Flight-number databases are sometimes out of date. If the route is wrong, fix it here.</div>
+      <div class="hdr">Data</div>
+      <div class="card" id="dataList"></div>
+    </section>
+
+    <section data-tab="guide" hidden>
+      <div class="hdr">What the numbers mean</div>
+      <div class="card" id="ladder"></div>
+      <div class="foot" id="ladderNote">How often a flight this long gets at least one jolt this big. Bars are on a log scale; full means every flight.</div>
+      <div class="hdr">How strong airliners are</div>
+      <div class="card">
+        <div class="row"><span class="k">Normal flight</span><span class="v">1 g</span></div>
+        <div class="row"><span class="k">Certified with zero damage</span><span class="v">−1 to +2.5 g</span></div>
+        <div class="row"><span class="k">Must not break before</span><span class="v">−1.5 to +3.75 g</span></div>
+      </div>
+      <div class="foot">Every airliner is certified to these limits (EASA CS-25 / FAA Part 25). Even severe turbulence rarely goes past ±1 g; the injuries it causes are almost always to people not wearing a seatbelt.</div>
+      <div class="hdr">How this works</div>
+      <div class="card"><ul class="list howlist">
+        <li>Position comes from the plane's own ADS-B broadcast (adsb.lol, adsb.fi, OpenSky). Over oceans receivers lose it, so the marker moves along the projected path from the last fix, and you can tap the map to correct it.</li>
+        <li>The projected path follows the great circle to your destination from your current heading. The corridor is how far real flights stray from that line (wind-optimised tracks, airways), narrowing as you approach landing.</li>
+        <li>The official ICAO forecasts airlines plan with, from the World Area Forecast System: gridded turbulence and storm tops, and the significant-weather chart. They carry the largest single weight.</li>
+        <li>A multi-model ensemble on the full NOAA GFS, ECMWF IFS and ECMWF AI (AIFS) grids: eight turbulence measures on two cruise layers, mapped onto the official scale the way NCAR's Graphical Turbulence Guidance does it, weighted for your flight level. Their spread sets how wide the g range is.</li>
+        <li>Storms: model instability and rain, forecast storm tops, and live satellite storm detection along the next three hours (Meteosat storm cells and lightning; cold cloud tops from GOES and Himawari).</li>
+        <li>Official warnings (SIGMETs) and recent pilot reports near your path raise the forecast where they apply.</li>
+        <li>Turbulence becomes g through a gust-response model for your aircraft's size and weight (the jolts get bigger as fuel burns off), then a simulation adds patchiness and forecast error.</li>
+        <li>Your reports feed a Gaussian process in time: one term for "this plane feels rougher or smoother than the model", another for "the model is wrong about this patch of weather" that fades over about 40 minutes.</li>
+        <li>How-often figures come from airline turbulence measurements (moderate or worse in about 1% of reports, severe under 0.1%). They're order-of-magnitude numbers.</li>
+      </ul></div>
+      <div class="foot" style="margin-bottom:12px">Open source. Not an operational tool: the crew sees storms on radar, gets real-time reports and routes around the worst. Keep your seatbelt fastened whenever you're seated.</div>
+      <div class="card"><div class="row"><span class="k">Appearance</span><select id="selTheme" aria-label="Appearance"><option value="">Automatic</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
+    </section>
+  </section>
+</div>
+
+<nav class="tabbar" id="tabbar" aria-label="Sections" hidden><div class="in" role="tablist">
+  <button type="button" role="tab" data-t="now" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 16a8 8 0 1 1 16 0"/><path d="M12 16l4-5"/><circle cx="12" cy="16" r="1.4" fill="currentColor"/></svg>Now</button>
+  <button type="button" role="tab" data-t="map" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg>Map</button>
+  <button type="button" role="tab" data-t="trip" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>Flight</button>
+  <button type="button" role="tab" data-t="guide" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.6" r="1.1" fill="currentColor"/></svg>Guide</button>
+</div></nav>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="grab"></div>
+    <div class="top"><b id="sheetTitle">Airport</b><button type="button" id="sheetClose">Done</button></div>
+    <input id="apQ" type="search" placeholder="City, airport or code" autocomplete="off" spellcheck="false" aria-label="Search airports">
+    <div class="res" id="apRes"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin="anonymous" referrerpolicy="no-referrer" defer></script>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
