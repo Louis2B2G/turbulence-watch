@@ -54,7 +54,7 @@ flowchart LR
 
 1. **Fork or use this repo.** In a fork, enable Actions (Actions tab). If the publish step fails with a 403, set Settings → Actions → General → Workflow permissions to *Read and write*.
 2. **Build the data once.** Actions → *Forecast fields* → *Run workflow* (tick *force*). It takes about 4 minutes and creates the `data` branch. After that it runs every hour by itself and only rebuilds when a new forecast is out.
-3. **Import into Vercel.** New Project → import the repo. Framework preset: *Other*. Leave build and output settings empty (`vercel.json` sets the output to `public/`). Deploy. Commits to the `data` branch carry their own `vercel.json` so Vercel doesn't deploy them.
+3. **Import into Vercel.** New Project → import the repo → Deploy. `vercel.json` pins the framework to *Other* and the output to `public/`, so the build settings can stay as they are. Commits to the `data` branch carry their own `vercel.json` so Vercel doesn't deploy them.
 
 That's it. The functions read the data branch of whichever repo Vercel deployed from. Optional environment variables:
 
@@ -69,7 +69,7 @@ GitHub disables scheduled workflows in public repos after 60 days without activi
 ## Run it locally
 
 ```bash
-pip install -r requirements.txt
+pip install -r pipeline/requirements.txt
 python -m pipeline.fields          # writes ./out (TW_HOURS=12 for a quicker build)
 DATA_DIR=./out npm run dev         # http://localhost:3000
 ```
