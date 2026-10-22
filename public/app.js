@@ -176,8 +176,11 @@ function resolveRoute() {
   }
   if (!cands.length) { F.origin = F.dest = null; F.routeSrc = null; F.routeWarn = "unknown"; return; }
   const fresh = p && Date.now() - Date.parse(p.t) < 30 * MIN && (p.alt_ft ?? 0) > 3000;
-  if (!fresh) { // can't check against the plane: trust the flight-number database as listed
-    const c = cands[0]; F.origin = c.o; F.dest = c.d; F.routeSrc = c.src; return;
+  if (!fresh) { // can't check against a flying plane: trust the flight-number database as listed...
+    const c = cands[0]; F.origin = c.o; F.dest = c.d; F.routeSrc = c.src;
+    // ...unless the plane was seen recently somewhere near neither end (e.g. waiting at another airport: a reused flight number)
+    if (p && Date.now() - Date.parse(p.t) < 3 * HOUR && Math.min(hav(p.lat, p.lon, c.o.lat, c.o.lon), hav(p.lat, p.lon, c.d.lat, c.d.lon)) > 150) F.routeWarn = "mismatch";
+    return;
   }
   const score = (c) => {
     const L = hav(c.o.lat, c.o.lon, c.d.lat, c.d.lon), { xt, at } = xtrack(p.lat, p.lon, c.o, c.d);
@@ -681,15 +684,22 @@ function fitGP() {
 }
 const gpFactor = () => (GP ? GP.factor : 1);
 
-function randn() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+let spareN = null;   // Box-Muller gives two normals per draw: keep the second
+function randn() {
+  if (spareN !== null) { const s = spareN; spareN = null; return s; }
+  let u = 0; while (!u) u = Math.random();
+  const r = Math.sqrt(-2 * Math.log(u)), th = 2 * Math.PI * Math.random();
+  spareN = r * Math.sin(th);
+  return r * Math.cos(th);
+}
 // Monte Carlo of the biggest jolt in the next n minutes: per-minute peak g = k * 0.55 * EDR * patchiness * forecast error.
 // Patchiness: lognormal AR(1), sigma 0.45, ~6 min memory (the air itself). Forecast error: lognormal AR(1) with ~90 min
 // memory, because a forecast that is off stays off for a while; its spread is the forecasts' own (median to the upper
 // estimate = 1.28 sigma). Treating forecast error as minute-to-minute noise, as before, fattened every tail.
 const SP = 0.45;
 const fErr = (m) => clamp(Math.log(Math.max(F.D.hi[m], F.D.med[m]) / Math.max(F.D.med[m], 1e-3)) / 1.28, 0.2, 0.7);
-function simulate(n) {
-  const D = F.D, start = Math.max(0, nowMin()), S = 4000, rho = Math.exp(-1 / 6), sq = Math.sqrt(1 - rho * rho), R = 0.55, PF = 0.15;
+function simulate(n, start = Math.max(0, nowMin()), S = 4000) {
+  const D = F.D, rho = Math.exp(-1 / 6), sq = Math.sqrt(1 - rho * rho), R = 0.55, PF = 0.15;
   const rf = Math.exp(-1 / 90), sqf = Math.sqrt(1 - rf * rf);
   const Fm = [], SF = [], K = [];
   for (let i = 0; i < n; i++) {
@@ -726,6 +736,52 @@ function gStretch(m) {
 }
 const gAtStep = (s) => gStretch(s.m);
 const gPerEdr = (m) => gpFactor() * kAt(m) * STRETCH(SP);   // for single EDR numbers (map layer, forecast bars)
+
+/* ------------------------------------------------------------------ the flight minute by minute */
+const FEEL = {
+  smooth: "Smooth air. You'd barely notice.",
+  light: "Light chop: drinks ripple, the seatbelt sign may come on.",
+  moderate: "Strong jolts: hard to walk, you feel the belt.",
+  severe: "Loose things fly; belted passengers are fine.",
+  extreme: "Almost never happens to airliners.",
+};
+let lvCache = null;
+function minuteLevels() {   // level of the typical jolt, minute by minute (cached per forecast and per your reports)
+  const D = F.D, key = D.at + ":" + D.M + ":" + (GP ? GP.n + ":" + GP.factor.toFixed(4) : "-");
+  if (lvCache?.key === key) return lvCache.v;
+  const v = new Uint8Array(D.M);
+  for (let m = 0; m < D.M; m++) { const g = gStretch(m); let k = 0; while (k < LEVELS.length - 1 && g >= LEVELS[k].max) k++; v[m] = k; }
+  lvCache = { key, v };
+  return v;
+}
+const flightSpan = () => { const D = F.D; return [D.t0, D.arr || D.t0 + (D.M - 1) * MIN]; };
+// The coloured strip: one run per stretch at the same level; what's already behind you is faded
+function stripSVG() {
+  const D = F.D, lv = minuteLevels(), M = D.M, past = Math.floor(nowMin());
+  let s = "", run = 0;
+  for (let m = 1; m <= M; m++) {
+    if (m < M && lv[m] === lv[run] && (m <= past) === (run <= past)) continue;
+    const x0 = (run / Math.max(1, M - 1)) * 1000, x1 = (Math.min(m, M - 1) / Math.max(1, M - 1)) * 1000, L = LEVELS[lv[run]];
+    s += `<rect x="${x0.toFixed(1)}" y="0" width="${Math.max(1.2, x1 - x0 + 0.6).toFixed(1)}" height="10" style="fill:var(${L.c});opacity:${run < past ? 0.22 : L.key === "smooth" ? 0.5 : 1}"/>`;
+    run = m;
+  }
+  return `<div class="barwrap"><svg class="bar" viewBox="0 0 1000 10" preserveAspectRatio="none" aria-hidden="true">${s}</svg></div>`;
+}
+// Hour ticks under a strip spanning a..b, plus the ends (and "now" when it's inside)
+function ticksHTML(a, b, ends) {
+  const span = Math.max(1, b - a), stepH = span > 10 * HOUR ? 3 : span > 5 * HOUR ? 2 : 1, out = [], pos = (t) => (100 * (t - a)) / span;
+  for (let h = Math.ceil(a / (stepH * HOUR)) * stepH * HOUR; h < b; h += stepH * HOUR) { const p = pos(h); if (p > 9 && p < 86) out.push(`<span style="left:${p.toFixed(2)}%">${fmtT(h)}</span>`); }
+  if (ends) {
+    const flying = airborneKind(F.D.fixKind);
+    out.push(`<span class="end l" style="left:0">${flying ? "now" : fmtT(a)}</span>`);
+    if (F.D.arr) out.push(`<span class="end r" style="left:100%">${fmtT(b)}</span>`);
+  }
+  const now = Date.now();
+  if (now > a && now < b) out.push(`<i class="nowmark" style="left:${pos(now).toFixed(2)}%"></i>`);
+  return out.join("");
+}
+const MEM_NAME = { wafs: "Official WAFS", ifs: "ECMWF", gfs: "NOAA GFS", aifs: "ECMWF AI", storm: "Storms", wind: "Ground wind" };
+const memBars = (mem) => `<div class="mem">${Object.entries(mem).sort((a, b) => (a[0] === "storm" || a[0] === "wind") - (b[0] === "storm" || b[0] === "wind")).map(([k, v]) => `<span>${MEM_NAME[k] || k}</span><span class="b"><i style="width:${Math.min(100, (v / 0.5) * 100)}%;background:${col(gPerEdr(nowMin()) * v)}"></i></span><span class="num">${v.toFixed(2)}</span>`).join("")}</div>`;
 
 /* ------------------------------------------------------------------ forecast log (to score your reports later) */
 function logForecast() {
@@ -780,9 +836,11 @@ function showHome() {
 }
 function showTab(t) {
   tab = t; store.set("tw:tab", t);
+  document.body.dataset.tab = t;
+  if (t !== "map") stopPlay();
   document.querySelectorAll("#flight [data-tab]").forEach((s) => (s.hidden = s.dataset.tab !== t));
   document.querySelectorAll(".tabbar button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
-  if (t === "map") requestAnimationFrame(() => { initMap(); if (MAP) { MAP.map.invalidateSize(); drawMap(); } });
+  if (t === "map") requestAnimationFrame(() => { initMap(); if (F) { renderScrubber(); renderMoment(); } if (MAP) { MAP.map.invalidateSize(); drawMap(); } });
   window.scrollTo({ top: 0 });
 }
 function renderRecent() {
@@ -818,7 +876,8 @@ function openFlight(q, url = {}) {
     if (navigator.permissions?.query) navigator.permissions.query({ name: "geolocation" }).then((r) => { if (r.state !== "denied") resume(); }).catch(resume);
     else resume();
   }
-  GP = null; drawn = null;
+  GP = null; drawn = null; SEL = null; lvCache = null; stopPlay();
+  if (MAP) { MAP.fitted = false; MAP.fieldKey = null; MAP.chartKey = null; clearFields(); MAP.groups.chart.clearLayers(); }
   $("home").hidden = true; $("flight").hidden = false; $("tabbar").hidden = false;
   $("fTitle").textContent = q; $("fSub").innerHTML = "&nbsp;"; document.title = `${q} · Turbulence Watch`;
   $("banner").hidden = true;
@@ -872,7 +931,11 @@ let timers = [];
 function startTimers() {
   stopTimers();
   timers.push(setInterval(() => { if (F && document.visibilityState === "visible" && Date.now() - lastTry > (F.fix?.kind === "live" ? 2 : 5) * MIN) refresh(); }, 20e3));
-  timers.push(setInterval(() => { if (F && F.D && document.visibilityState === "visible") { renderNow(); updatePlane(); } }, 30e3));
+  timers.push(setInterval(() => {
+    if (!F || !F.D || document.visibilityState !== "visible") return;
+    renderNow(); updatePlane();
+    if (tab === "map" && !playTimer) { renderScrubber(); if (SEL == null) paintSel({}); }
+  }, 30e3));
 }
 function stopTimers() { timers.forEach(clearInterval); timers = []; }
 document.addEventListener("visibilitychange", () => { if (F && document.visibilityState === "visible" && Date.now() - lastTry > MIN) refresh(); });
@@ -881,7 +944,7 @@ document.addEventListener("visibilitychange", () => { if (F && document.visibili
 function renderAll() {
   if (!F) return;
   renderHeader(); renderBanner(); renderNow(); renderTrip(); renderLadder();
-  if (MAP && tab === "map") drawMap();
+  if (tab === "map") { renderScrubber(); renderMoment(); if (MAP) drawMap(); }
 }
 function renderHeader() {
   const cls = F.D && !F.D.landed ? classFor() : null, ty = F.info?.aircraft?.type, tn = ty && TYPES[ty] ? TYPES[ty][0] : ty;
@@ -902,7 +965,10 @@ function renderBanner() {
   const gpsBtn = `<button class="pill" type="button" data-act="gps">${gpsWatch != null ? "GPS on" : "Use my GPS"}</button>`;
   const posBtns = `<div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button><button class="pill gray" type="button" data-act="dep">Set takeoff time</button></div>`;
   if (F.routeWarn === "unknown") html = `<div><b>We couldn't find ${esc(F.q)}'s route.</b> Tell us where it flies and the forecast follows.</div><div class="btns"><button class="pill" type="button" data-act="from">Set departure</button><button class="pill" type="button" data-act="to">Set destination</button></div>`;
-  else if (F.routeWarn === "mismatch") html = `<div><b>The route looks wrong.</b> The flight database says ${esc(apCode(F.origin))} → ${esc(apCode(F.dest))}, but the plane isn't on that path. Set the right one.</div><div class="btns"><button class="pill" type="button" data-act="to">Set destination</button><button class="pill gray" type="button" data-act="from">Set departure</button></div>`;
+  else if (F.routeWarn === "mismatch") {
+    const p = F.info?.position, where = p ? nearCity(p.lat, p.lon) : "";
+    html = `<div><b>The route looks wrong.</b> The flight database says ${esc(apCity(F.origin))} → ${esc(apCity(F.dest))}, but the plane ${where ? `was last seen ${esc(where)}` : "isn't on that path"}. Flight numbers get reused; set the right airports.</div><div class="btns"><button class="pill" type="button" data-act="from">Set departure</button><button class="pill" type="button" data-act="to">Set destination</button></div>`;
+  }
   else if (fx?.kind === "unknown") { info = true; html = `<div><b>Can't see ${esc(F.q)} right now.</b> Flight trackers lose planes over oceans. If you're flying, turn on your phone's GPS (works in airplane mode at a window seat), correct the position on the map, or set your takeoff time. Until then this assumes takeoff now.</div>${posBtns}<div class="gpsstat"${gpsWatch != null || gpsMsg ? "" : " hidden"}>${gpsLine()}</div>`; }
   else if ((fx?.kind === "dr" || fx?.kind === "takeoff") && Date.now() - fx.t > 20 * MIN) { info = true; html = `<div><b>${fx.kind === "takeoff" ? `Estimated from your ${fmtT(fx.t)} takeoff.` : `Last seen ${fmtT(fx.t)} (${esc(fx.src)}).`}</b> Flight trackers lose planes over oceans, so the position is dead-reckoned with the forecast winds. Your phone's GPS fixes that; so does dragging the plane to where the seatback map shows it.</div><div class="btns">${gpsBtn}<button class="pill gray" type="button" data-act="tap">Correct position</button></div><div class="gpsstat"${gpsWatch != null || gpsMsg ? "" : " hidden"}>${gpsLine()}</div>`; }
   else if (fx?.kind === "landed") { info = true; html = `<div><b>Landed</b> at ${esc(apCity(F.dest))}.</div>`; }
@@ -916,16 +982,59 @@ function act(a) {
   else if (a === "gps") gpsToggle();
 }
 
+// What a stretch is near: the departure or arrival end, said plainly
+function stretchPlace(s) {
+  const D = F.D, t1 = D.arr || D.t0 + (D.M - 1) * MIN;
+  if (D.arr && t1 - s.start < 35 * MIN && F.dest) return `landing in ${apCity(F.dest)}`;
+  if (!airborneKind(D.fixKind) && s.end - D.t0 < 35 * MIN && F.origin) return `climbing out of ${apCity(F.origin)}`;
+  return "";
+}
+// The bumpy stretches only, with neighbours of the same cause merged (e.g. the last minutes of an approach)
+function bumpyStretches(segs = segments()) {
+  const out = [];
+  for (const s of segs) {
+    if (s.key === "smooth") continue;
+    const last = out[out.length - 1];
+    if (last && Math.abs(last.end - s.start) < 2 * MIN && last.why === s.why) {
+      last.end = s.end;
+      if (s.peakG > last.peakG) Object.assign(last, { peakG: s.peakG, peakE: s.peakE, peakT: s.peakT, key: s.key, name: s.name, c: s.c });
+      for (const [k, v] of Object.entries(s.mem)) last.mem[k] = Math.max(last.mem[k] ?? 0, v);
+      s.flags.forEach((f) => last.flags.add(f));
+    } else out.push({ ...s, mem: { ...s.mem }, flags: new Set(s.flags) });
+  }
+  return out;
+}
+// The answer for the whole (remaining) flight: how much of it is at each level, how bad the worst bit is, and whether to worry
+function verdictHTML() {
+  const D = F.D, lv = minuteLevels(), from = clamp(Math.floor(nowMin()), 0, D.M - 1), cnt = [0, 0, 0, 0, 0];
+  for (let m = from; m < D.M; m++) cnt[lv[m]]++;
+  const tot = Math.max(1, D.M - from), bumps = bumpyStretches();
+  let worstL = 0; for (let k = 0; k < cnt.length; k++) if (cnt[k]) worstL = k;
+  const worst = bumps.reduce((a, s) => (!a || s.peakG > a.peakG ? s : a), null);
+  const nMod = bumps.filter((s) => s.key !== "light").length, bumpy = 1 - cnt[0] / tot;
+  const base = bumpy < 0.25 ? "Mostly smooth" : bumpy < 0.6 ? "Light bumps on and off" : "Light bumps much of the way";
+  const head = worstL === 0 ? "Smooth flight" : worstL === 1 ? (base === "Mostly smooth" ? "Mostly smooth, a few light bumps" : base)
+    : worstL === 2 ? `${base}, ${nMod <= 1 ? "one bumpier patch" : nMod + " bumpier patches"}` : `${base}, rough patches possible`;
+  const calm = worstL <= 1 ? "Nothing to worry about. Keep your belt on when you're seated, as always."
+    : worstL === 2 ? "Bumpy at times, not dangerous. Belt on and snug; the crew may pause the drinks." : "Some strong jolts are possible. Keep your belt tight whenever you're seated: airliners are built for far more than this, and turbulence injuries happen to people who aren't belted.";
+  const flying = airborneKind(D.fixKind), L = LEVELS[worstL];
+  const when = flying ? "For the rest of the flight." : D.fixKind === "unknown" ? "If you took off now." : `For takeoff at ${fmtT(D.t0)}${dayTag(D.t0)}.`;
+  const place = worst ? stretchPlace(worst) : "";
+  const bump = worst && worst.key !== "smooth" ? `<button type="button" class="jump" data-t="${worst.peakT}">Bumpiest: ${place ? esc(place) + ", " : ""}${fmtR(worst.start, worst.end)}, ${esc(worst.why.toLowerCase())}, up to ±${worst.peakG.toFixed(2)} g <span class="chev">›</span></button>` : "";
+  return `<div class="lvl"><i class="dot" style="background:var(${L.c})"></i><span>${head}</span></div><div class="calm">${calm}</div><div class="small">${when}</div>${bump}`;
+}
 function renderNow() {
   const D = F.D, fx = F.fix;
   if (!D || D.landed || !D.med) {
-    $("hero").innerHTML = D?.landed ? `<div class="lvl"><i class="dot" style="background:var(--green)"></i><span>Landed</span></div><div class="small">Welcome to ${esc(apCity(F.dest))}.</div>` : `<div class="lvl"><i class="dot" style="background:var(--label3)"></i><span>${busy ? "Loading" : "No forecast yet"}</span></div><div class="small">${busy ? "Getting the plane's position and the latest forecasts." : esc(errMsg || "Set the route in the Flight tab.")}</div>`;
-    $("tiles").innerHTML = ""; $("stats").innerHTML = ""; $("hist").innerHTML = ""; $("feelBox").hidden = true; $("posBtns").hidden = true;
+    $("hero").innerHTML = D?.landed ? `<div class="lvl"><i class="dot" style="background:var(--green)"></i><span>Landed</span></div><div class="small">Welcome to ${esc(apCity(F.dest))}.</div>` : `<div class="lvl"><i class="dot" style="background:var(--label3)"></i><span>${busy ? "Loading" : "No forecast yet"}</span></div><div class="small">${busy ? "Getting the plane's position and the latest forecasts." : esc(errMsg || "Set the route in the Details tab.")}</div>`;
+    $("tiles").innerHTML = ""; $("ovStrip").innerHTML = ""; $("ovMix").innerHTML = ""; $("segList").innerHTML = ""; $("nowBox").hidden = true;
     return;
   }
   const flying = airborneKind(D.fixKind), el = Math.max(0, nowMin()), at = (m) => fmtT(D.t0 + m * MIN);
-  $("feelBox").hidden = !flying;
+  $("nowBox").hidden = !flying;
   const segs = segments();
+  $("hero").innerHTML = verdictHTML();
+  $("hero").querySelectorAll(".jump").forEach((b) => b.addEventListener("click", () => jumpTo(+b.dataset.t)));
   if (flying) {
     const r20 = simulate(20), L = level(r20.med);
     let calmAt = null, nextBump = null;
@@ -934,13 +1043,19 @@ function renderNow() {
     const left = D.M - el;
     for (let m = Math.round(el) + 1; m < D.M; m++) if (gm(m) >= 0.2) { nextBump = m; break; }
     const calm = calmAt === null ? (left < 40 ? "Bumpy into landing, as descents often are." : "No long smooth stretch ahead.") : calmAt <= el + 2 ? (nextBump ? `Smooth until about ${at(nextBump)}.` : "Smooth for the rest of the flight.") : `Smooth again from about ${at(calmAt)}.`;
-    $("hero").innerHTML = `<div class="lvl"><i class="dot" style="background:var(${L.c})"></i><span>${L.name}</span></div><div>Biggest jolt in the next 20 min: most likely <b class="num">±${r20.med.toFixed(2)} g</b></div><div class="small">${calm} Chance of anything moderate in the next 20 min: ${pct(r20.pMod)}.</div>`;
-  } else {
-    const worst = segs.reduce((a, s) => (!a || s.peakG > a.peakG ? s : a), null);
-    const L = level(worst ? worst.peakG : 0);
-    const when = D.fixKind === "unknown" ? "if you take off now" : `for takeoff at ${fmtT(D.t0)}${dayTag(D.t0)}`;
-    $("hero").innerHTML = `<div class="lvl"><i class="dot" style="background:var(${L.c})"></i><span>${worst && L.key !== "smooth" ? "Mostly smooth, some " + L.name.toLowerCase() : "Smooth flight"}</span></div><div>Forecast ${when}.</div><div class="small">${worst && L.key !== "smooth" ? `Bumpiest stretch: ${fmtR(worst.start, worst.end)}, up to ±${worst.peakG.toFixed(2)} g, ${worst.why.toLowerCase()}.` : "No bumpy stretches in the forecast."} The details are in the Flight tab.</div>`;
+    $("nowCard").innerHTML = `<div class="lvl2"><i class="dot" style="background:var(${L.c})"></i><span>${L.name}</span><span class="feelx">${esc(FEEL[L.key])}</span></div><div>Biggest jolt in the next 20 min: most likely <b class="num">±${r20.med.toFixed(2)} g</b>, 1 in 10 bigger than ±${r20.p90.toFixed(2)} g.</div><div class="small">${calm} Chance of a moderate jolt in the next 20 min: ${pct(r20.pMod)}.</div>`;
   }
+  // the flight, minute by minute: tap anywhere to see that moment on the map
+  const [a, b] = flightSpan();
+  $("ovStrip").innerHTML = stripSVG() + `<div class="ticks">${ticksHTML(a, b, true)}</div>`;
+  const lv = minuteLevels(), from = clamp(Math.floor(nowMin()), 0, D.M - 1), cnt = [0, 0, 0, 0, 0];
+  for (let m = from; m < D.M; m++) cnt[lv[m]]++;
+  const tot = Math.max(1, D.M - from);
+  $("ovMix").innerHTML = LEVELS.slice(0, 4).filter((l, k) => cnt[k] || k < 2).map((l, k) => `<span><i class="dot" style="background:var(${l.c})"></i>${l.name} ${cnt[k] && cnt[k] / tot < 0.01 ? "<1" : Math.round((100 * cnt[k]) / tot)}%</span>`).join("") + `<span class="mixnote">of the ${flying ? "remaining " : ""}flight time</span>`;
+  const bumps = bumpyStretches(segs), smoothPct = Math.round((100 * cnt[0]) / tot);
+  $("segList").innerHTML = bumps.map((m) => { const pl = stretchPlace(m); return `<button class="row seg2" type="button" data-t="${m.peakT}"><span class="k"><i class="dot" style="background:var(${m.c})"></i><span><b>${m.name}</b><small>${esc(m.why)}${pl ? ", " + esc(pl) : ""}</small></span></span><span class="v num"><span>${fmtR(m.start, m.end)}</span><small>up to ±${m.peakG.toFixed(2)} g</small></span><span class="chev">›</span></button>`; }).join("")
+    + (segs.length ? `<div class="row seg2 calmrow"><span class="k"><i class="dot" style="background:var(--green)"></i><span><b>${bumps.length ? "Smooth in between" : "Smooth all the way"}</b><small>${smoothPct}% of the ${flying ? "remaining " : ""}flight</small></span></span></div>` : `<div class="row"><span class="k" style="color:var(--label2)">Nothing left to forecast.</span></div>`);
+  $("segList").querySelectorAll("button[data-t]").forEach((x) => x.addEventListener("click", () => jumpTo(+x.dataset.t)));
   // tiles
   const tiles = [];
   const arr = D.arr;
@@ -958,10 +1073,9 @@ function renderNow() {
     tiles.push(["Distance", D.L ? Math.round(D.L).toLocaleString("en-US") + " km" : "—", D.L ? Math.round(D.L / 1.852).toLocaleString("en-US") + " nm" : ""]);
   }
   tiles.push(["Landing", arr ? fmtT(arr) + dayTag(arr) : "—", arr && F.dest?.tz ? `${fmtT(arr, F.dest.tz)} in ${apCity(F.dest)}` : arr ? `in ${dur((arr - Date.now()) / MIN)}` : "route unknown"]);
-  $("tilesHdr").textContent = flying ? "Right now" : "Your flight";
+  $("tilesHdr").textContent = flying ? "Where you are" : "Your flight";
   $("posBtns").hidden = !flying;
   $("tiles").innerHTML = tiles.map(([a, b, c]) => `<div class="tile"><span>${esc(a)}</span><b>${esc(b)}</b><small>${esc(c) || "&nbsp;"}</small></div>`).join("");
-  renderHist();
   renderFelt();
 }
 function renderHist() {
@@ -981,7 +1095,8 @@ function renderHist() {
   [[r.med, "most likely", 0], [r.p90, "9 in 10 below", 14]].forEach(([v, lab, dy]) => { if (v <= xmax) s += `<line class="mk" x1="${X(v)}" y1="${T + 4}" x2="${X(v)}" y2="${H - B}"/><text class="mkt" x="${Math.min(X(v) + 4, W - 80)}" y="${T + 14 + dy}">${lab}</text>`; });
   $("hist").innerHTML = s; nowMed = r.med;
   $("stats").innerHTML = `<div class="tile"><span>Most likely</span><b class="num">±${r.med.toFixed(2)} g</b><small>${level(r.med).name}</small></div><div class="tile"><span>9 in 10 below</span><b class="num">±${r.p90.toFixed(2)} g</b><small>${level(r.p90).name}</small></div><div class="tile"><span>Moderate ±0.5 g</span><b class="num">${pct(r.pMod)}</b><small>chance</small></div><div class="tile"><span>Severe ±1 g</span><b class="num">${pct(r.pSev)}</b><small>chance</small></div>`;
-  $("nLabel").textContent = N >= 60 && N % 60 === 0 ? N / 60 + (N === 60 ? " hour" : " hours") : N + " min";
+  const nTxt = N >= 60 && N % 60 === 0 ? N / 60 + (N === 60 ? " hour" : " hours") : N + " min";
+  $("nHdr").textContent = airborneKind(D.fixKind) ? `Biggest jolt in the next ${nTxt}` : `Biggest jolt in the first ${nTxt} after takeoff`;
   renderLadder();
 }
 function setN(n) {
@@ -1025,9 +1140,9 @@ function segments() {
     const lv = LEVELS[li];
     if (last && last.key === lv.key) {
       last.end = end; last.drv.add(s.drv); s.flags.forEach((f) => last.flags.add(f));
-      if (g > last.peakG) { last.peakG = g; last.peakE = s.med; }
+      if (g > last.peakG) { last.peakG = g; last.peakE = s.med; last.peakT = Math.max(s.t, now); }
       for (const [k, v] of Object.entries(s.mem)) last.mem[k] = Math.max(last.mem[k] ?? 0, v);
-    } else out.push({ key: lv.key, name: lv.name, c: lv.c, start: Math.max(s.t, now), end, peakG: g, peakE: s.med, drv: new Set([s.drv]), flags: new Set(s.flags), mem: { ...s.mem } });
+    } else out.push({ key: lv.key, name: lv.name, c: lv.c, start: Math.max(s.t, now), end, peakG: g, peakE: s.med, peakT: Math.max(s.t, now), drv: new Set([s.drv]), flags: new Set(s.flags), mem: { ...s.mem } });
   });
   for (const s of out) s.why = s.drv.has("wind") ? (s.drv.has("storm") ? "Gusty wind near the ground, storms" : "Gusty wind near the ground")
     : s.drv.has("storm") && s.drv.has("jet") ? "Storms and jet-stream shear" : s.drv.has("storm") ? "Storm clouds near the route" : "Jet-stream wind shear";
@@ -1064,21 +1179,11 @@ function renderTrip() {
   for (const g of D?.ground || []) dl.push([`Wind at ${esc(g.ap)} for ${g.end === "dep" ? "takeoff" : "landing"}`, `${g.u} kt gusting ${g.g50}, up to ${g.g90} kt${g.dir != null ? ` from ${g.dir}°` : ""} (${g.n} forecasts)`]);
   $("dataList").innerHTML = dl.map(([a, b]) => `<div class="row"><span class="k">${a}</span><span class="v">${b}</span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2)">Loading…</span></div>`;
 
-  if (!D || D.landed || !D.med) { $("timeline").innerHTML = ""; $("segList").innerHTML = ""; $("agree").innerHTML = ""; $("warnList").innerHTML = ""; return; }
+  if (!D || D.landed || !D.med) { $("agree").innerHTML = ""; $("warnList").innerHTML = ""; $("hist").innerHTML = ""; $("stats").innerHTML = ""; return; }
+  renderHist();
   const segs = segments(), now = Date.now();
-  const t0 = Math.min(now, D.t0 + (D.steps[0]?.m || 0) * MIN), t1 = D.arr || D.t0 + (D.M - 1) * MIN, X = (t) => 6 + (348 * (t - t0)) / Math.max(1, t1 - t0);
-  let s = `<rect class="track" x="6" y="16" width="348" height="16" rx="8"/>`;
-  for (const g of segs) { const lv = LEVELS.find((l) => l.key === g.key); s += `<rect x="${X(g.start)}" y="16" width="${Math.max(1.5, X(g.end) - X(g.start))}" height="16" style="fill:var(${lv.c});opacity:${lv.key === "smooth" ? 0.5 : 0.95}"/>`; }
-  const span = t1 - t0, stepH = span > 10 * HOUR ? 3 : span > 5 * HOUR ? 2 : 1;
-  for (let h = Math.ceil(t0 / (stepH * HOUR)) * stepH * HOUR; h <= t1; h += stepH * HOUR) { const x = X(h); if (x > 22 && x < 330) s += `<text class="t" x="${x}" y="46" text-anchor="middle">${fmtT(h)}</text>`; }
-  const nx = X(now);
-  if (nx >= 6 && nx <= 354) s += `<line class="now" x1="${nx}" y1="11" x2="${nx}" y2="37" stroke-width="2.5" stroke-linecap="round"/><text class="nowt" x="${clamp(nx - 8, 2, 330)}" y="9">now</text>`;
-  s += `<text class="t" x="354" y="61" text-anchor="end">${D.arr ? "landing " + fmtT(t1) : "next 3 hours (route unknown)"}</text>`;
-  $("timeline").innerHTML = s;
-  $("segList").innerHTML = segs.map((m) => `<div class="row"><span class="k" style="display:flex;align-items:center;gap:10px"><i class="dot" style="background:var(${m.c})"></i><span>${m.name}${m.key !== "smooth" ? `<br><small>${m.why}</small>` : ""}</span></span><span class="v num">${fmtR(m.start, m.end)}<br><small>up to ±${m.peakG.toFixed(2)} g</small></span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2)">Nothing left to forecast.</span></div>`;
-  const NAME = { wafs: "Official WAFS", ifs: "ECMWF", gfs: "NOAA GFS", aifs: "ECMWF AI", storm: "Storms", wind: "Ground wind" };
-  const ag = segs.filter((x) => x.key !== "smooth").slice(0, 4);
-  $("agree").innerHTML = ag.length ? ag.map((x, i) => `<div style="font-size:15px;font-weight:600;margin:${i ? 14 : 0}px 0 8px">${fmtR(x.start, x.end)}</div><div class="mem">${Object.entries(x.mem).sort((a, b) => (a[0] === "storm") - (b[0] === "storm")).map(([k, v]) => `<span>${NAME[k] || k}</span><span class="b"><i style="width:${Math.min(100, (v / 0.5) * 100)}%;background:${col(gPerEdr(nowMin()) * v)}"></i></span><span class="num">${v.toFixed(2)}</span>`).join("")}</div>`).join("") : `<div style="color:var(--label2);font-size:15px">No bumpy stretches left to compare.</div>`;
+  const ag = bumpyStretches(segs).slice(0, 4);
+  $("agree").innerHTML = ag.length ? ag.map((x, i) => `<div style="font-size:15px;font-weight:600;margin:${i ? 14 : 0}px 0 8px">${fmtR(x.start, x.end)}</div>${memBars(x.mem)}`).join("") : `<div style="color:var(--label2);font-size:15px">No bumpy stretches left to compare.</div>`;
   // warnings and pilot reports
   // each warning/report once, with the stretch of the flight it applies to
   const fspan = new Map(), fsteps = D.steps.filter((x, i) => i === D.steps.length - 1 || D.steps[i + 1].t > now);
@@ -1134,25 +1239,40 @@ function defineCloudLayer() {
     },
   });
 }
+// A <canvas> placed on the map like an image, redrawn in place as the time slider moves (no image encoding).
+let CanvasOverlay = null;
+function defineCanvasOverlay() {
+  if (CanvasOverlay || !window.L) return;
+  CanvasOverlay = L.ImageOverlay.extend({
+    _initImage() {
+      const el = (this._image = this._url);
+      L.DomUtil.addClass(el, "leaflet-image-layer");
+      if (this._zoomAnimated) L.DomUtil.addClass(el, "leaflet-zoom-animated");
+      if (this.options.className) L.DomUtil.addClass(el, this.options.className);
+      el.onselectstart = L.Util.falseFn; el.onmousemove = L.Util.falseFn;
+    },
+  });
+}
 let MAP = null, drawn = null, editMode = false, editLL = null;
-const LAYERS = store.get("tw:layers", { turb: true, clouds: true, storms: true, warn: true });
+const LAYERS = Object.assign({ turb: true, clouds: true, storms: true, warn: true }, store.get("tw:layers", {}));
 function initMap() {
   if (MAP || !window.L || $("flight").hidden) return;
-  defineCloudLayer();
+  defineCloudLayer(); defineCanvasOverlay();
   const map = L.map("map", { zoomControl: true, minZoom: 2, maxZoom: 10, worldCopyJump: false, attributionControl: true, zoomSnap: 0.5 });
   map.zoomControl.setPosition("bottomright");
   map.createPane("base").style.zIndex = 150;
   map.getPane("base").classList.add("basepane");
+  map.createPane("field").style.zIndex = 330;
+  map.getPane("field").style.pointerEvents = "none";
   const gibsT = (layer, lvl, ext, o = {}) => L.tileLayer(`https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/${layer}/default/default/GoogleMapsCompatible_Level${lvl}/{z}/{y}/{x}.${ext}`, { maxNativeZoom: lvl, maxZoom: 12, ...o });
   gibsT("BlueMarble_ShadedRelief_Bathymetry", 8, "jpg", { pane: "base", attribution: '<a href="https://earthdata.nasa.gov/gibs">NASA GIBS</a>' }).addTo(map);
   gibsT("Coastlines_15m", 13, "png", { opacity: 0.35 }).addTo(map);
   const wms = (layers, o = {}) => L.tileLayer.wms("https://view.eumetsat.int/geoserver/wms", { layers, format: "image/png", transparent: true, version: "1.3.0", attribution: '<a href="https://view.eumetsat.int">EUMETSAT</a>', ...o });
-  const groups = {
-    clouds: L.layerGroup([new CloudLayer({ maxNativeZoom: 8, maxZoom: 12, opacity: 0.9, attribution: "Clouds: EUMETSAT, NOAA, JMA via NASA GIBS" })]),
-    storms: L.layerGroup([wms("msg_fes:rdt", { opacity: 0.85 }), wms("mtg_fd:li_afa", { opacity: 0.9 })]),
-    turb: L.layerGroup(), warn: L.layerGroup(), route: L.layerGroup(),
-  };
-  for (const [k, g] of Object.entries(groups)) if (k === "route" || LAYERS[k]) g.addTo(map);
+  // live satellite (the present only) and the forecast at the slider's time
+  const live = { clouds: new CloudLayer({ maxNativeZoom: 8, maxZoom: 12, opacity: 0.9, attribution: "Clouds: EUMETSAT, NOAA, JMA via NASA GIBS" }), rdt: wms("msg_fes:rdt", { opacity: 0.85 }), li: wms("mtg_fd:li_afa", { opacity: 0.9 }) };
+  const groups = { clouds: L.layerGroup(), storms: L.layerGroup(), turb: L.layerGroup(), warn: L.layerGroup(), chart: L.layerGroup(), route: L.layerGroup(), sel: L.layerGroup() };
+  for (const [k, g] of Object.entries(groups)) if (!(k in LAYERS) || LAYERS[k]) g.addTo(map);
+  if (LAYERS.warn === false) groups.chart.remove();
   map.createPane("planePane").style.zIndex = 650;
   // position tools: phone GPS and "correct position" (drag the plane / tap where you are)
   const Tools = L.Control.extend({
@@ -1166,14 +1286,13 @@ function initMap() {
     },
   });
   new Tools({ position: "topleft" }).addTo(map);
-  MAP = { map, groups, plane: null, view: store.get("tw:view", "30"), turbKey: null };
+  MAP = { map, groups, live, liveOn: {}, plane: null, selPlane: null, selRing: null, fieldKey: null, fields: null, chartKey: null, sig: [], pir: [], fitted: false };
   map.on("click", (e) => {
     if (!F) return;
     if (editMode) { editLL = e.latlng; updatePlane(); return; }
-    if (LAYERS.storms) stormPopup(e.latlng);
+    if (LAYERS.storms && MAP.liveA > 0.3) stormPopup(e.latlng);
   });
   document.querySelectorAll("#layerChips .chip").forEach((b) => b.setAttribute("aria-pressed", String(!!LAYERS[b.dataset.l])));
-  setView(MAP.view, false);
   renderGPS();
 }
 
@@ -1202,7 +1321,7 @@ async function stormPopup(ll) {
 /* correcting the position by hand: ground truth that re-anchors the path */
 function startEdit() {
   if (!F?.D || F.D.landed || !F.D.lat) { setStatus("Set the route first, then correct the position."); return; }
-  editMode = true; editLL = null;
+  editMode = true; editLL = null; SEL = null; stopPlay();
   if (tab !== "map") showTab("map");
   requestAnimationFrame(() => {
     initMap();
@@ -1211,7 +1330,7 @@ function startEdit() {
     const [la, lo] = planeLL();
     editLL = L.latLng(la, unwrapTo(lo, MAP.lonRef ?? lo));
     if (MAP.map.getZoom() < 5) MAP.map.setView(editLL, 6);
-    updatePlane();
+    updatePlane(); mapAt(selT());
     renderGPS();
   });
 }
@@ -1220,7 +1339,7 @@ function endEdit(apply) {
   editMode = false; editLL = null;
   $("editBar").hidden = true; $("mapWrap").classList.remove("editing");
   if (apply && ll) { const w = ll.wrap(); setManual(w.lat, w.lng); }
-  else updatePlane();
+  else { updatePlane(); if (MAP) mapAt(selT()); }
   renderGPS();
 }
 function setManual(lat, lon) {
@@ -1232,9 +1351,9 @@ function setManual(lat, lon) {
   F.st.track.push([+lat.toFixed(4), +lon.toFixed(4), now, Math.round(alt), null, trk == null ? null : Math.round(trk), "you"]);
   F.st.track.sort((a, b) => a[2] - b[2]);
   saveF(); drawn = null;
-  if (MAP) { MAP.turbKey = null; MAP.view = "30"; }
+  SEL = null;
   setStatus("Position set. Recomputing the path from there…");
-  refresh().then(() => { if (MAP && tab === "map") setView("30"); });
+  refresh().then(() => { if (MAP && tab === "map") mapAt(selT(), { pan: true }); });
 }
 // distance to go, as shown on the seatback map: puts the plane on the projected path at that distance
 function setByDistance(km) {
@@ -1322,17 +1441,19 @@ function pathLL(a, b, step = 1) {
   for (let m = Math.max(0, a); m <= Math.min(D.M - 1, b); m += step) { const lo = unwrapTo(D.lon[m], ref); ref = lo; out.push([D.lat[m], lo, m]); }
   return out;
 }
-function planeLL() {
-  const D = F.D, m = clamp(nowMin(), 0, D.M - 1), i = Math.floor(m), f = m - i, j = Math.min(D.M - 1, i + 1);
-  const lat = D.lat[i] + (D.lat[j] - D.lat[i]) * f, lon = D.lon[i] + wrap(D.lon[j] - D.lon[i]) * f;
-  return [lat, lon, headingAt({ lat: D.lat, lon: D.lon, M: D.M }, i)];
+function planeAt(mf) {   // position and heading at a (fractional) minute of the path
+  const D = F.D, m = clamp(mf, 0, D.M - 1), i = Math.floor(m), f = m - i, j = Math.min(D.M - 1, i + 1);
+  return [D.lat[i] + (D.lat[j] - D.lat[i]) * f, D.lon[i] + wrap(D.lon[j] - D.lon[i]) * f, headingAt({ lat: D.lat, lon: D.lon, M: D.M }, i)];
 }
+const planeLL = () => planeAt(nowMin());
 const planeSvg = (h, est) => `<svg width="34" height="34" viewBox="0 0 24 24" style="transform:rotate(${h}deg)"><path d="M12 2c.8 0 1.3.9 1.3 2v5.2l7.7 4.6v2l-7.7-2.4v4.4l2.2 1.7V21L12 20l-3.5 1v-1.5l2.2-1.7v-4.4L3 15.8v-2l7.7-4.6V4c0-1.1.5-2 1.3-2z" fill="${est ? "#bfefff" : "#4fd1ff"}" stroke="#062a3a" stroke-width=".8"/></svg>`;
+// the plane now (only once it's flying, or while you correct its position)
 function updatePlane() {
   if (!MAP || !F?.D || F.D.landed || !F.D.lat) return;
+  if (!airborneKind(F.D.fixKind) && !editMode) { if (MAP.plane) { MAP.plane.remove(); MAP.plane = null; } return; }
   const [la, lo, h] = planeLL(), est = F.fix?.kind !== "live";
   const ll = editMode && editLL ? editLL : L.latLng(la, unwrapTo(lo, MAP.lonRef ?? lo));
-  const lab = editMode ? "drag me, or tap where you are" : F.fix?.kind === "manual" && Date.now() - F.fix.t < 10 * MIN ? "your correction" : est ? "estimated now" : "";
+  const lab = editMode ? "drag me, or tap where you are" : F.fix?.kind === "manual" && Date.now() - F.fix.t < 10 * MIN ? "your correction" : est ? "now (estimated)" : "now";
   const icon = L.divIcon({ className: "plane" + (editMode ? " editing" : ""), html: (editMode ? `<div class="ring"></div>` : "") + planeSvg(h, est && !editMode) + (lab ? `<div class="planeLab" style="position:absolute;left:36px;top:9px">${lab}</div>` : ""), iconSize: [34, 34], iconAnchor: [17, 17] });
   if (MAP.plane && MAP.planeEdit !== editMode) { MAP.plane.remove(); MAP.plane = null; }
   if (!MAP.plane) {
@@ -1341,14 +1462,140 @@ function updatePlane() {
     if (editMode) MAP.plane.on("dragend", () => { editLL = MAP.plane.getLatLng(); });
   } else { MAP.plane.setLatLng(ll); MAP.plane.setIcon(icon); }
 }
+
+/* ------------------------------------------------------------------ the time slider */
+// One chosen moment drives the map (where you'll be, and the forecast around you then) and the readout under it.
+// SEL = null follows the present (or the takeoff, before the flight).
+let SEL = null, selFrame = 0, selOpts = {}, playTimer = null;
+function selT() {
+  const D = F?.D;
+  if (!D?.med || D.landed) return null;
+  const [a, b] = flightSpan();
+  return clamp(SEL ?? Date.now(), a, b);
+}
+function relTime(t) {
+  const d = (t - Date.now()) / MIN;
+  if (Math.abs(d) < 2.5) return "now";
+  return d > 0 ? "in " + dur(d) : dur(-d) + " ago";
+}
+function setSel(t, opts = {}) {
+  const D = F?.D;
+  if (!D?.med || D.landed) return;
+  const [a, b] = flightSpan(), now = clamp(Date.now(), a, b);
+  t = clamp(t, a, b);
+  SEL = Math.abs(t - now) < 2.5 * MIN ? null : t;
+  selOpts = { ...selOpts, ...opts };
+  if (!selFrame) selFrame = requestAnimationFrame(() => { selFrame = 0; const o = selOpts; selOpts = {}; paintSel(o); });
+}
+let fullTimer = 0;
+function paintSel(o = {}) {
+  if (!F?.D?.med || F.D.landed) return;
+  // while the slider moves: a quick simulation; a full one once it rests
+  positionThumb(); renderMoment(true);
+  clearTimeout(fullTimer); fullTimer = setTimeout(() => { if (F?.D?.med) renderMoment(false); }, 280);
+  if (MAP && tab === "map") mapAt(selT(), o);
+}
+function jumpTo(t) { stopPlay(); SEL = null; setSel(t, { pan: true }); showTab("map"); }
+function stopPlay() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  const b = $("playBtn"); if (b) { b.classList.remove("on"); b.querySelector("span").textContent = "Play"; b.setAttribute("aria-label", "Play the flight"); }
+}
+function togglePlay() {
+  if (playTimer) return stopPlay();
+  const D = F?.D; if (!D?.med || D.landed) return;
+  const [a, b] = flightSpan();
+  if (selT() >= b - MIN) setSel(a);
+  const btn = $("playBtn"); btn.classList.add("on"); btn.querySelector("span").textContent = "Pause"; btn.setAttribute("aria-label", "Pause");
+  playTimer = setInterval(() => {
+    const t = selT() + (b - a) / 320;
+    if (t >= b) { setSel(b, { pan: true }); stopPlay(); return; }
+    SEL = t; setSel(t, { pan: true, instant: true });
+  }, 60);
+}
+function renderScrubber() {
+  const D = F?.D, wrapEl = $("scrub")?.parentElement;
+  if (!wrapEl) return;
+  const ok = !!(D?.med && !D.landed);
+  wrapEl.hidden = !ok;
+  if (!ok) return;
+  const [a, b] = flightSpan();
+  $("scrubStrip").innerHTML = stripSVG();
+  $("scrubTicks").innerHTML = ticksHTML(a, b, true);
+  $("nowBtn").textContent = airborneKind(D.fixKind) ? "Now" : "Takeoff";
+  positionThumb();
+}
+function positionThumb() {
+  const D = F?.D, sc = $("scrub");
+  if (!sc || !D?.med || D.landed) return;
+  const [a, b] = flightSpan(), t = selT(), f = (t - a) / Math.max(1, b - a), m = clamp(Math.round((t - D.t0) / MIN), 0, D.M - 1);
+  $("scrubThumb").style.left = (100 * f).toFixed(3) + "%";
+  const rel = relTime(t), bub = $("scrubBubble");
+  bub.textContent = `${fmtT(t)}${dayTag(t)}${rel ? " · " + rel : ""}`;
+  // keep the time bubble inside the slider: centred on the knob unless that would run off either end
+  const tw = sc.clientWidth, bw = bub.offsetWidth, x = f * tw;
+  if (tw && bw) bub.style.transform = `translateX(${Math.round(clamp(-bw / 2, -x, tw - x - bw))}px)`;
+  const L = LEVELS[minuteLevels()[m]];
+  sc.setAttribute("aria-valuemin", "0"); sc.setAttribute("aria-valuemax", String(Math.round((b - a) / MIN))); sc.setAttribute("aria-valuenow", String(Math.round((t - a) / MIN)));
+  sc.setAttribute("aria-valuetext", `${fmtT(t)}, ${rel}, ${L.name}`);
+}
+// nearest big city, as "120 km NE of São Paulo"
+let BIG = null;
+function nearCity(lat, lon) {
+  if (!AP?.list?.length) return "";
+  BIG ||= AP.list.filter((a) => a.big);
+  let best = null, bd = Infinity;
+  for (const a of BIG) { if (Math.abs(a.lat - lat) > 12) continue; const d = hav(lat, lon, a.lat, a.lon); if (d < bd) { bd = d; best = a; } }
+  if (!best) return "";
+  let cc = "";
+  try { cc = best.cc ? new Intl.DisplayNames(["en"], { type: "region" }).of(best.cc) || "" : ""; } catch { cc = ""; }
+  const city = best.city + (cc && cc !== best.city ? ", " + cc.replace(/^United States$/, "USA").replace(/^United Kingdom$/, "UK") : "");
+  if (bd < 40) return `over ${city}`;
+  const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"], dir = dirs[Math.round(brg(best.lat, best.lon, lat, lon) / 45) % 8];
+  return `${(bd >= 1000 ? Math.round(bd / 100) * 100 : Math.round(bd / 10) * 10).toLocaleString("en-US")} km ${dir} of ${city}`;
+}
+// The readout for the chosen moment: where, how bumpy, the odds around then, why, and whether to worry
+function renderMoment(fast = false) {
+  const el = $("moment"), D = F?.D;
+  if (!el) return;
+  if (!D || D.landed || !D.med) { el.innerHTML = `<div class="small" style="padding:4px 0">${D?.landed ? "Landed." : busy ? "Loading the forecast…" : "No forecast yet: set the route in the Details tab."}</div>`; return; }
+  const t = selT(), mf = (t - D.t0) / MIN, m = clamp(Math.round(mf), 0, D.M - 1);
+  const n = Math.min(20, D.M), start = clamp(m - 10, 0, Math.max(0, D.M - n)), r = simulate(n, start, fast ? 1200 : 4000), L = level(r.med);
+  const [la, lo] = planeAt(mf), fl = D.fl[m], ft = fl * 100;
+  const flying = airborneKind(D.fixKind), dep = F.st.dep || (flying ? null : D.t0);
+  const since = dep && t > dep ? `${dur((t - dep) / MIN)} after takeoff` : "";
+  const toGo = D.arr ? `${dur((D.arr - t) / MIN)} to landing` : "";
+  const place = nearCity(la, lo);
+  const height = ft >= 18000 && D.ph?.[m] === 0 ? `${Math.round(ft / 1000)},000 ft` : ft > 300 ? `${(Math.round(ft / 500) * 500).toLocaleString("en-US")} ft, ${D.ph?.[m] === 2 ? "descending" : "climbing"}` : m < D.M / 2 ? "taking off" : "touching down";
+  // why: the step at or just before this minute
+  let s = null; for (const x of D.steps) { if (x.m <= m) s = x; else { if (!s) s = x; break; } }
+  const cause = !s || L.key === "smooth" ? "" : s.drv === "wind" ? "Gusty wind near the ground" : s.drv === "storm" ? "Storm clouds near the route" : "Jet-stream wind shear";
+  const facts = s ? [...new Set(s.flags.filter((f) => /^(Official|Forecast chart|Forecast wind|Pilot)/.test(f) || /satellite/.test(f)))].slice(0, 4) : [];
+  const vals = s ? Object.entries(s.mem).filter(([k]) => MEMBERS.includes(k)).map(([, v]) => v).filter((v) => v > 0) : [];
+  const agree = vals.length > 1 ? (Math.max(...vals) / Math.max(0.02, Math.min(...vals)) > 2 ? "The forecasts disagree here, so the odds are wider." : "The forecasts agree here.") : "";
+  const worry = r.pSev >= 0.1 ? ["warn", "Strong jolts possible. Keep your belt tight and stow loose things. Uncomfortable, but airliners are built for far more than this."]
+    : L.key === "moderate" || r.pMod >= 0.5 ? ["mid", "Bumpy, not dangerous. Belt on and snug; the crew may pause service."]
+    : L.key === "light" || r.pMod >= 0.15 ? ["ok", "Nothing to worry about. Some bumps; keep your belt on."]
+    : ["ok", "Nothing to worry about. Smooth air expected."];
+  const live = MAP && MAP.liveA > 0 && Math.abs(t - Date.now()) > 2.5 * MIN ? `<div class="mnote">The satellite layers on the map show the present, not ${fmtT(t)}.</div>` : "";
+  el.innerHTML =
+    `<div class="mwhen"><b>${fmtT(t)}${dayTag(t)}</b><span>${esc([relTime(t) === "now" ? "now" : relTime(t), since, toGo].filter(Boolean).join(" · "))}</span></div>` +
+    `<div class="mwhere">${esc([place, height].filter(Boolean).join(" · "))}</div>` +
+    `<div class="mlvl"><i class="dot" style="background:var(${L.c})"></i><b>${L.name}</b><span>${esc(FEEL[L.key])}</span></div>` +
+    `<div class="mworry ${worry[0]}">${esc(worry[1])}</div>` +
+    `<div class="mstats"><div><span>Typical biggest jolt</span><b class="num">±${r.med.toFixed(2)} g</b></div><div><span>1 in 10 bigger than</span><b class="num">±${r.p90.toFixed(2)} g</b></div><div><span>Moderate ±0.5 g</span><b class="num">${pct(r.pMod)}</b></div><div><span>Severe ±1 g</span><b class="num">${pct(r.pSev)}</b></div></div>` +
+    `<div class="mnote">For the 20 minutes around ${fmtT(t)}.${agree ? " " + agree : ""}</div>` +
+    (cause || facts.length ? `<div class="mwhy">${cause ? `<b>${esc(cause)}</b>` : ""}${facts.map((f) => `<span>${esc(f)}</span>`).join("")}</div>` : "") + live;
+}
+
+/* ------------------------------------------------------------------ the map at the chosen moment */
 function drawMap() {
   if (!MAP || !F) return;
   const D = F.D, gR = MAP.groups.route, gW = MAP.groups.warn;
-  if (!D || D.landed || !D.lat) { gR.clearLayers(); MAP.plane = null; return; }
+  if (!D || D.landed || !D.lat) { gR.clearLayers(); gW.clearLayers(); MAP.groups.sel.clearLayers(); MAP.groups.chart.clearLayers(); MAP.plane = MAP.selPlane = MAP.selRing = null; MAP.sig = []; MAP.pir = []; $("mapBadge").hidden = true; if (!MAP.fitted && F?.dest) { MAP.map.setView([F.dest.lat, F.dest.lon], 5); MAP.fitted = true; } return; }
   const key = D.at + ":" + Math.round(nowMin() / 5);
   if (drawn !== key) {
     drawn = key;
-    gR.clearLayers(); gW.clearLayers(); MAP.plane = null;
+    gR.clearLayers(); gW.clearLayers(); MAP.groups.sel.clearLayers(); MAP.plane = MAP.selPlane = MAP.selRing = null; MAP.chartKey = null;
     const mNow = clamp(Math.round(nowMin()), 0, D.M - 1);
     const ahead = pathLL(mNow, D.M - 1);
     MAP.lonRef = ahead.length ? ahead[0][1] : D.lon[0];
@@ -1360,7 +1607,7 @@ function drawMap() {
       L.polyline(pts, { color: "#4fd1ff", weight: 3, opacity: 0.9 }).addTo(gR);
     }
     const firstFix = tr.length ? tr[0] : null;
-    if (F.origin && D.fixKind !== "planned" && D.fixKind !== "unknown" && D.fixKind !== "ground" && D.fixKind !== "takeoff") {
+    if (F.origin && airborneKind(D.fixKind) && D.fixKind !== "takeoff") {
       const to = firstFix ? [firstFix[0], firstFix[1]] : [D.lat[0], D.lon[0]], L0 = hav(F.origin.lat, F.origin.lon, to[0], to[1]);
       if (L0 > 50) {
         const pts = []; let ref = MAP.lonRef, la = F.origin.lat, lo = F.origin.lon;
@@ -1371,7 +1618,7 @@ function drawMap() {
       }
     }
     const back = pathLL(0, mNow);
-    if (back.length > 1 && D.fixKind !== "planned" && D.fixKind !== "unknown" && D.fixKind !== "ground") L.polyline(back.map((p) => [p[0], p[1]]), { color: "#4fd1ff", weight: 3, opacity: 0.6, dashArray: "2 6" }).addTo(gR);
+    if (back.length > 1 && airborneKind(D.fixKind)) L.polyline(back.map((p) => [p[0], p[1]]), { color: "#4fd1ff", weight: 3, opacity: 0.6, dashArray: "2 6" }).addTo(gR);
     // corridor (80%: +-1.28 sigma)
     const left = [], right = [];
     for (const [la, lo, m] of pathLL(mNow, D.M - 1, 3)) {
@@ -1379,17 +1626,16 @@ function drawMap() {
       const a = move(la, lo, h - 90, off), b = move(la, lo, h + 90, off);
       left.push([a[0], unwrapTo(a[1], lo)]); right.push([b[0], unwrapTo(b[1], lo)]);
     }
-    if (left.length > 1) L.polygon([...left, ...right.reverse()], { color: "#ff4fd8", weight: 1, opacity: 0.45, dashArray: "3 5", fillColor: "#ff4fd8", fillOpacity: 0.1, interactive: false }).addTo(gR);
-    // projected path, coloured by the expected jolts
-    const segs = [];
-    for (let i = 0; i < D.steps.length - 1; i++) {
-      const s = D.steps[i], e = D.steps[i + 1];
-      if (e.m < mNow) continue;
-      const pts = pathLL(Math.max(s.m, mNow), e.m, 1).map((p) => [p[0], p[1]]);
-      if (pts.length > 1) segs.push([pts, level(gAtStep(s)).hex]);
+    if (left.length > 1) L.polygon([...left, ...right.reverse()], { color: "#ff4fd8", weight: 1, opacity: 0.35, dashArray: "3 5", fillColor: "#ff4fd8", fillOpacity: 0.06, interactive: false }).addTo(gR);
+    // projected path, coloured by the expected jolts (minute by minute, so it matches the slider)
+    const lv = minuteLevels();
+    let run = mNow, ref = MAP.lonRef;
+    for (let m = mNow + 1; m <= D.M; m++) {
+      if (m < D.M && lv[m] === lv[run]) continue;
+      const pts = pathLL(run, Math.min(m, D.M - 1), 1).map(([a, b]) => { const lo = unwrapTo(b, ref); ref = lo; return [a, lo]; });
+      if (pts.length > 1) L.polyline(pts, { color: LEVELS[lv[run]].hex, weight: 4, opacity: 0.95, dashArray: "8 6", lineCap: "butt", interactive: false }).addTo(gR);
+      run = m;
     }
-    let ref = MAP.lonRef;
-    for (const [pts, c] of segs) { const fixd = pts.map(([a, b]) => { const lo = unwrapTo(b, ref); ref = lo; return [a, lo]; }); L.polyline(fixd, { color: c, weight: 4, opacity: 0.95, dashArray: "8 6", lineCap: "butt" }).addTo(gR); }
     // time ticks: every 30 min for the first 2 h, then hourly
     const tz = tzOf();
     let lref = MAP.lonRef;
@@ -1408,102 +1654,263 @@ function drawMap() {
       L.circleMarker([a.lat, lo], { radius: 5, color: "#fff", weight: 2, fillColor: "#111", fillOpacity: 1 }).bindPopup(`<b>${esc(apCode(a))}</b> ${esc(a.name)}`).addTo(gR);
       L.marker([a.lat, lo], { icon: L.divIcon({ className: "aplab", html: `<span style="position:absolute;left:8px;top:-8px">${esc(apCode(a))}</span>`, iconSize: [0, 0] }), interactive: false }).addTo(gR);
     }
-    // official warnings and pilot reports
-    for (const s of D.sigmets || []) {
+    // official warnings (shown while in force at the chosen moment) and pilot reports (near the present)
+    MAP.sig = (D.sigmets || []).map((s) => {
       const c0 = s.coords[0], shift = unwrapTo(c0[1], MAP.lonRef) - c0[1];
-      L.polygon(s.coords.map(([a, b]) => [a, b + shift]), { color: "#ffb347", weight: 1.5, dashArray: "5 4", fillColor: "#ffb347", fillOpacity: 0.08 })
-        .bindPopup(`<b>SIGMET: ${esc((s.qualifier ? s.qualifier.toLowerCase() + " " : "") + (HAZ_NAME[s.hazard] || s.hazard))}</b><br>${esc(s.fir)} · FL${Math.round(s.base / 100)}–${Math.round(s.top / 100)}<br>valid ${fmtR(s.from, s.to)}<div class="raw" style="margin-top:6px">${esc(s.raw)}</div>`).addTo(gW);
-    }
-    for (const r of D.pireps || []) {
+      const layer = L.polygon(s.coords.map(([a, b]) => [a, b + shift]), { color: "#ffb347", weight: 1.5, dashArray: "5 4", fillColor: "#ffb347", fillOpacity: 0.08 })
+        .bindPopup(`<b>SIGMET: ${esc((s.qualifier ? s.qualifier.toLowerCase() + " " : "") + (HAZ_NAME[s.hazard] || s.hazard))}</b><br>${esc(s.fir)} · FL${Math.round(s.base / 100)}–${Math.round(s.top / 100)}<br>in force ${fmtR(s.from, s.to)}<div class="raw" style="margin-top:6px">${esc(s.raw)}</div>`);
+      return { layer, from: s.from, to: s.to, on: false };
+    });
+    MAP.pir = (D.pireps || []).map((r) => {
       const lc = LEVELS[Math.min(4, [0, 1, 1, 2, 2, 3, 4][r.lvl])].hex;
-      L.circleMarker([r.lat, unwrapTo(r.lon, MAP.lonRef)], { radius: 5, color: "#000", weight: 1, fillColor: lc, fillOpacity: 0.95 })
-        .bindPopup(`<b>Pilot report: ${esc(TB_NAME[r.lvl])}</b><br>${r.fl ? "FL" + r.fl + " · " : ""}${esc(r.ac)} · ${ago(r.t)}<div class="raw" style="margin-top:6px">${esc(r.raw)}</div>`).addTo(gW);
-    }
-    loadTurb();
+      const layer = L.circleMarker([r.lat, unwrapTo(r.lon, MAP.lonRef)], { radius: 5, color: "#000", weight: 1, fillColor: lc, fillOpacity: 0.95 })
+        .bindPopup(`<b>Pilot report: ${esc(TB_NAME[r.lvl])}</b><br>${r.fl ? "FL" + r.fl + " · " : ""}${esc(r.ac)} · ${ago(r.t)}<div class="raw" style="margin-top:6px">${esc(r.raw)}</div>`);
+      return { layer, on: false };
+    });
+    loadFields();
   }
   updatePlane();
-  $("mapMeta").textContent = `Turbulence layer: the forecast for the time you'll pass each spot (blend of the official WAFS forecast and the model ensemble). Clouds: live infrared (Meteosat, GOES, Himawari). Storm cells and lightning: Meteosat area. Times in ${tzLabel()}.${LAYERS.turb && MAP.turbErr ? " " + MAP.turbErr : ""}`;
+  if (!MAP.fitted) { MAP.fitted = true; aroundPlane(selT(), false); }
+  mapAt(selT(), { pan: false });
+  $("mapMeta").textContent = `Turbulence and storm shading: the forecast at cruising height for the time on the slider (official WAFS blended with ECMWF, NOAA and ECMWF AI, every 3 hours, blended in between). Times in ${tzLabel()}.${MAP.fieldErr ? " " + MAP.fieldErr : ""}`;
 }
-function setView(v, save = true) {
-  if (!MAP) return;
-  MAP.view = v; if (save) store.set("tw:view", v);
-  document.querySelectorAll("#scaleSeg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.k === v)));
+function aroundPlane(t, animate = true) {
+  if (!MAP || !F?.D?.lat) return;
+  const [la, lo] = planeAt((t - F.D.t0) / MIN);
+  MAP.map.setView([la, unwrapTo(lo, MAP.lonRef ?? lo)], 5.5, { animate });
+}
+function fitFlight() {
   const D = F?.D;
-  if (!D || D.landed || !D.lat) { if (F?.dest) MAP.map.setView([F.dest.lat, F.dest.lon], 5); else MAP.map.setView([30, 0], 2); return; }
-  const mNow = clamp(Math.round(nowMin()), 0, D.M - 1), [la, lo] = planeLL();
-  if (v === "plane") { MAP.map.setView([la, unwrapTo(lo, MAP.lonRef ?? lo)], 7); return; }
-  const span = v === "all" ? D.M : +v;
-  const pts = pathLL(v === "all" ? 0 : mNow, Math.min(D.M - 1, mNow + span), 2);
-  if (v === "all") for (const p of F.st.track) pts.push([p[0], unwrapTo(p[1], pts[0]?.[1] ?? p[1])]);
-  if (pts.length < 2) { MAP.map.setView([la, lo], 6); return; }
-  const b = L.latLngBounds(pts.map((p) => [p[0], p[1]]));
-  const pad = v === "all" ? 0 : clamp(1.28 * (D.sig[Math.min(D.M - 1, mNow + span)] || 20) / 111, 0.2, 3);
-  MAP.map.fitBounds(b.pad(0.08).extend([b.getSouth() - pad, b.getWest() - pad]).extend([b.getNorth() + pad, b.getEast() + pad]), { maxZoom: v === "30" ? 8 : 7, animate: save });
+  if (!MAP || !D?.lat || D.landed) return;
+  const pts = pathLL(0, D.M - 1, 4).map((p) => [p[0], p[1]]);
+  for (const p of F.st.track) pts.push([p[0], unwrapTo(p[1], pts[0]?.[1] ?? p[1])]);
+  if (pts.length < 2) return;
+  MAP.map.fitBounds(L.latLngBounds(pts).pad(0.06), { maxZoom: 7 });
 }
-// forecast overlay: frames from /api/grid, each cell coloured by the forecast at the time the plane passes nearest to it
-async function loadTurb() {
-  const D = F.D, g = MAP.groups.turb;
-  if (!D || !D.lat || !LAYERS.turb) return;
-  const key = D.at;
-  if (MAP.turbKey === key) return;
-  MAP.turbKey = key; MAP.turbErr = "";
+function mapAt(t, o = {}) {
+  if (!MAP || !F?.D?.lat || F.D.landed || t == null) return;
+  const D = F.D, now = Date.now(), mf = (t - D.t0) / MIN, m = clamp(Math.round(mf), 0, D.M - 1), [la, lo, h] = planeAt(mf);
+  const ll = L.latLng(la, unwrapTo(lo, MAP.lonRef ?? lo)), airborne = airborneKind(D.fixKind), atNow = Math.abs(t - now) < 2.5 * MIN;
+  // the plane at that moment and the ring it will most likely be in (8 times in 10)
+  const r = Math.max(8, 1.28 * (D.sig[m] || 0)) * 1000, showSel = !editMode && (!airborne || !atNow);
+  if (!MAP.selRing) MAP.selRing = L.circle(ll, { radius: r, color: "#ff4fd8", weight: 1.5, opacity: 0.8, dashArray: "4 4", fillColor: "#ff4fd8", fillOpacity: 0.08, interactive: false }).addTo(MAP.groups.sel);
+  else { MAP.selRing.setLatLng(ll); MAP.selRing.setRadius(r); }
+  if (showSel) {
+    if (!MAP.selPlane) MAP.selPlane = L.marker(ll, { icon: L.divIcon({ className: "plane sel", html: planeSvg(0, true) + `<div class="planeLab" style="position:absolute;left:36px;top:9px"></div>`, iconSize: [34, 34], iconAnchor: [17, 17] }), pane: "planePane", interactive: false, keyboard: false }).addTo(MAP.groups.sel);
+    else MAP.selPlane.setLatLng(ll);
+    const el = MAP.selPlane.getElement();   // turn the plane and relabel it in place (no new marker per step)
+    if (el) { const sv = el.querySelector("svg"), lb = el.querySelector(".planeLab"); if (sv) sv.style.transform = `rotate(${h}deg)`; if (lb) lb.textContent = fmtT(t); }
+  } else if (MAP.selPlane) { MAP.selPlane.remove(); MAP.selPlane = null; }
+  // keep that point well inside the view
+  if (o.pan) { const b = MAP.map.getBounds().pad(-0.2); if (!b.contains(ll)) MAP.map.panTo(ll, { animate: !o.instant, duration: 0.35 }); }
+  liveAt(t); drawField(t); warnAt(t); chartAt(t);
+  const bd = $("mapBadge");
+  bd.hidden = false;
+  bd.className = "mapbadge" + (atNow ? " now" : "");
+  bd.textContent = atNow ? (airborne ? "Now" : "Takeoff") + (MAP.liveA > 0 ? " · live satellite" : "") : `${fmtT(t)}${dayTag(t)} · ${relTime(t)} · forecast`;
+}
+// live satellite layers: full strength within 45 min of the present, gone beyond 90
+function liveAt(t) {
+  const a = clamp(1 - (Math.abs(t - Date.now()) - 45 * MIN) / (45 * MIN), 0, 1);
+  MAP.liveA = a;
+  const set = (key, group, base, on) => {
+    const lay = MAP.live[key], want = on && a > 0.02;
+    if (want && !MAP.liveOn[key]) { lay.addTo(group); MAP.liveOn[key] = true; }
+    else if (!want && MAP.liveOn[key]) { group.removeLayer(lay); MAP.liveOn[key] = false; }
+    if (want) lay.setOpacity(base * a);
+  };
+  set("clouds", MAP.groups.clouds, 0.9, LAYERS.clouds);
+  set("rdt", MAP.groups.storms, 0.85, LAYERS.storms);
+  set("li", MAP.groups.storms, 0.9, LAYERS.storms);
+}
+function warnAt(t) {
+  const now = Date.now();
+  for (const s of MAP.sig || []) {
+    const want = t >= s.from - HOUR && t <= s.to + 30 * MIN;
+    if (want !== s.on) { if (want) s.layer.addTo(MAP.groups.warn); else MAP.groups.warn.removeLayer(s.layer); s.on = want; }
+  }
+  for (const p of MAP.pir || []) {
+    const want = Math.abs(t - now) < 90 * MIN;
+    if (want !== p.on) { if (want) p.layer.addTo(MAP.groups.warn); else MAP.groups.warn.removeLayer(p.layer); p.on = want; }
+  }
+}
+// The official significant-weather chart nearest the chosen moment (every 3 h): turbulence and storm-cloud areas
+const CHART = { man: null, at: 0, files: new Map() };
+async function chartFile(name) {
+  if (!CHART.files.has(name)) {
+    CHART.files.set(name, api(`/api/file?path=${encodeURIComponent(name)}`, {}, 20000).catch(() => { CHART.files.delete(name); return null; }));
+    if (CHART.files.size > 24) CHART.files.delete(CHART.files.keys().next().value);
+  }
+  return CHART.files.get(name);
+}
+async function chartAt(t) {
+  if (!MAP) return;
+  if (!CHART.man || Date.now() - CHART.at > 20 * MIN) {
+    if (CHART.loading) return;
+    CHART.loading = true;
+    try { CHART.man = await api("/api/file?path=manifest.json", {}, 15000); CHART.at = Date.now(); } catch { CHART.man = CHART.man || null; } finally { CHART.loading = false; }
+    if (!CHART.man) return;
+  }
+  const files = CHART.man.files || {}, times = Object.keys(files.sigwx_TURB || {});
+  let vt = null, bd = Infinity;
+  for (const k of times) { const d = Math.abs(Date.parse(k) - t); if (d < bd) { bd = d; vt = k; } }
+  if (!vt || bd > 2 * HOUR) vt = null;
+  const key = vt + ":" + (F?.D?.at || "");
+  if (MAP.chartKey === key) return;
+  MAP.chartKey = key;
+  const g = MAP.groups.chart;
+  if (!vt) { g.clearLayers(); return; }
+  const [turb, cb] = await Promise.all([chartFile(files.sigwx_TURB[vt]), files.sigwx_CB?.[vt] ? chartFile(files.sigwx_CB[vt]) : null]);
+  if (MAP.chartKey !== key) return;
+  g.clearLayers();
+  const ref = MAP.lonRef ?? 0, seen = new Set(), when = fmtT(Date.parse(vt));
+  const add = (coords, style, html) => {
+    if (!coords?.length) return;
+    const shift = unwrapTo(coords[0][0], ref) - coords[0][0];
+    const pts = coords.map(([x, y]) => [y, x + shift]);
+    const k = `${pts.length}:${pts[0][0].toFixed(1)}:${pts[0][1].toFixed(1)}`;
+    if (seen.has(k)) return; seen.add(k);
+    if (Math.abs(pts[0][1] - ref) > 200) return;
+    (style.poly ? L.polygon(pts, style) : L.polyline(pts, style)).bindPopup(html).addTo(g);
+  };
+  for (const f of turb?.features || []) {
+    const p = f.properties || {}, sev = p.severity === "severe", ring = f.geometry?.type === "Polygon" ? f.geometry.coordinates[0] : f.geometry?.coordinates;
+    add(ring, { poly: true, color: "#c77dff", weight: sev ? 2.6 : 1.3, opacity: 0.85, dashArray: "2 5", fill: true, fillColor: "#c77dff", fillOpacity: sev ? 0.07 : 0.03 },
+      `<b>Forecast chart: ${sev ? "severe" : "moderate"} turbulence</b><br>FL${esc(p.base)}–${esc(p.top)}, for ${when}. The official chart airlines plan with: severe means pockets of severe turbulence are possible somewhere in the area.`);
+  }
+  for (const f of cb?.features || []) {
+    const p = f.properties || {}, line = f.geometry?.type === "Polygon" ? f.geometry.coordinates[0] : f.geometry?.coordinates;
+    const ext = String(p.extent || "").toLowerCase(), ext2 = ext.includes("freq") ? "frequent" : ext.includes("ocnl") ? "occasional" : ext.includes("isol") ? "isolated" : "";
+    add(line, { color: "#ffb3d9", weight: 1.3, opacity: 0.9, dashArray: "1 6", lineCap: "round" },
+      `<b>Forecast chart: ${ext2 ? ext2 + " " : ""}storm clouds</b><br>${/^\d+$/.test(String(p.top)) ? `Tops FL${esc(p.top)}, ` : ""}for ${when}${ext.includes("embd") ? ", embedded in other cloud" : ""}.`);
+  }
+}
+// Forecast turbulence and storm tops at the chosen moment: 3-hourly frames from /api/grid, blended in time and space
+async function loadFields() {
+  const D = F.D, key = D.at;
+  if (!MAP || MAP.fieldKey === key) return;
+  MAP.fieldKey = key; MAP.fieldErr = "";
   const mNow = clamp(Math.round(nowMin()), 0, D.M - 1), pts = pathLL(mNow, D.M - 1, 10);
-  if (pts.length < 1) return;
+  if (!pts.length) return;
   let la0 = 90, la1 = -90, lo0 = 1e9, lo1 = -1e9;
   for (const [a, b] of pts) { la0 = Math.min(la0, a); la1 = Math.max(la1, a); lo0 = Math.min(lo0, b); lo1 = Math.max(lo1, b); }
-  la0 = Math.max(-80, la0 - 8); la1 = Math.min(80, la1 + 8); lo0 -= 10; lo1 += 10;
+  la0 = Math.max(-80, la0 - 10); la1 = Math.min(80, la1 + 10); lo0 -= 14; lo1 += 14;
   if (lo1 - lo0 > 300) { lo0 = -180; lo1 = 180; }
-  const fl = D.fl[mNow] > 200 ? D.fl[mNow] : 370;
+  const fl = D.fl[mNow] > 200 ? D.fl[mNow] : CLS[D.cls]?.fl || 370;
+  const tA = D.t0 + mNow * MIN, tB = D.arr || D.t0 + (D.M - 1) * MIN;
   let js;
-  try { js = await api(`/api/grid?bbox=${lo0.toFixed(1)},${la0.toFixed(1)},${lo1.toFixed(1)},${la1.toFixed(1)}&fl=${fl}&t0=${new Date(D.t0 + mNow * MIN).toISOString()}&t1=${new Date(D.arr || D.t0 + D.M * MIN).toISOString()}`, {}, 30000); }
-  catch (e) { MAP.turbErr = "Turbulence layer unavailable right now."; MAP.turbKey = null; return; }
-  if (!F || F.D !== D) return;
-  const frames = js.frames.map((f) => ({ t: Date.parse(f.valid), a: Uint8Array.from(atob(f.edr), (c) => c.charCodeAt(0)) }));
-  const ni = js.nlat, nj = js.nlon, E = js.edr_scale;
-  // nearest path point (every 10 min) for each cell -> the time the plane is there -> nearest frame
-  const P = pts.map(([a, b, m]) => [a, b, D.t0 + m * MIN]);
-  const fi = new Uint8Array(ni * nj), dk = new Float32Array(ni * nj);
-  for (let i = 0; i < ni; i++) {
-    const la = js.lat0 + i * js.dlat, cl = Math.cos(la * DEG);
-    for (let j = 0; j < nj; j++) {
-      const lo = js.lon0 + j * js.dlon;
-      let best = 0, bd = Infinity;
-      for (let k = 0; k < P.length; k++) { const dy = la - P[k][0], dx = (lo - P[k][1]) * cl, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = k; } }
-      const t = P[best][2];
-      let fb = 0; for (let f = 1; f < frames.length; f++) if (Math.abs(frames[f].t - t) < Math.abs(frames[fb].t - t)) fb = f;
-      fi[i * nj + j] = fb; dk[i * nj + j] = Math.sqrt(bd) * 111;
-    }
-  }
-  const kk = gPerEdr(mNow + 120);
-  // value per cell from its own valid time, then smooth (bilinear) between cells
-  const val = new Float32Array(ni * nj);
-  for (let c = 0; c < ni * nj; c++) val[c] = frames[fi[c]].a[c] * E;
+  try { js = await api(`/api/grid?bbox=${lo0.toFixed(1)},${la0.toFixed(1)},${lo1.toFixed(1)},${la1.toFixed(1)}&fl=${fl}&t0=${new Date(tA).toISOString()}&t1=${new Date(tB).toISOString()}`, {}, 30000); }
+  catch { MAP.fieldErr = "The forecast shading is unavailable right now."; MAP.fieldKey = null; return; }
+  if (!F || F.D !== D || !MAP) return;
+  const dec = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const frames = js.frames.map((f) => ({ t: Date.parse(f.valid), e: dec(f.edr), c: dec(f.cb) })).sort((a, b) => a.t - b.t);
+  if (!frames.length) return;
+  const ni = js.nlat, nj = js.nlon;
   const latN = js.lat0 - js.dlat / 2, latS = js.lat0 + (ni - 0.5) * js.dlat, lonW = js.lon0 - js.dlon / 2, lonE = js.lon0 + (nj - 0.5) * js.dlon;
   const merc = (la) => Math.log(Math.tan(Math.PI / 4 + (clamp(la, -85, 85) * DEG) / 2));
-  const W = clamp(nj * 3, 64, 1400), y0 = merc(latN), y1 = merc(latS), H = clamp(Math.round((W * (y0 - y1)) / ((lonE - lonW) * DEG)), 32, 1600);
-  const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
-  const cx = cv.getContext("2d"), img = cx.createImageData(W, H), px = img.data;
-  const rgb = LEVELS.map((l) => [parseInt(l.hex.slice(1, 3), 16), parseInt(l.hex.slice(3, 5), 16), parseInt(l.hex.slice(5, 7), 16)]);
-  const bil = (A, i0, i1, j0, j1, wy, wx) => (A[i0 * nj + j0] * (1 - wx) + A[i0 * nj + j1] * wx) * (1 - wy) + (A[i1 * nj + j0] * (1 - wx) + A[i1 * nj + j1] * wx) * wy;
+  const W = clamp(nj * 3, 64, 800), y0 = merc(latN), y1 = merc(latS), H = clamp(Math.round((W * (y0 - y1)) / ((lonE - lonW) * DEG)), 32, 1200);
+  // per row and column: the two grid rows/columns either side and the weights (bilinear)
+  const ry0 = new Int32Array(H), ry1 = new Int32Array(H), rwy = new Float32Array(H), rla = new Float32Array(H);
   for (let y = 0; y < H; y++) {
-    const la = (2 * Math.atan(Math.exp(y0 - ((y + 0.5) / H) * (y0 - y1))) - Math.PI / 2) / DEG;
-    const fiy = (la - js.lat0) / js.dlat, i0 = clamp(Math.floor(fiy), 0, ni - 1), i1 = clamp(i0 + 1, 0, ni - 1), wy = clamp(fiy - i0, 0, 1);
-    for (let x = 0; x < W; x++) {
-      const lo = lonW + ((x + 0.5) / W) * (lonE - lonW);
-      const fjx = (lo - js.lon0) / js.dlon, j0 = clamp(Math.floor(fjx), 0, nj - 1), j1 = clamp(j0 + 1, 0, nj - 1), wx = clamp(fjx - j0, 0, 1);
-      const gg = kk * bil(val, i0, i1, j0, j1, wy, wx);
-      if (gg < 0.17) continue;
-      const lv = LEVELS.findIndex((l) => gg < l.max), [r, g2, b] = rgb[Math.max(1, lv)];
-      const fade = clamp(1 - (bil(dk, i0, i1, j0, j1, wy, wx) - 700) / 500, 0.2, 1);
-      const al = gg < 0.2 ? 0.08 * (gg - 0.17) / 0.03 : lv === 1 ? 0.08 + 0.32 * clamp((gg - 0.2) / 0.3, 0, 1) : lv === 2 ? 0.55 : 0.65;
-      const o = (y * W + x) * 4;
-      px[o] = r; px[o + 1] = g2; px[o + 2] = b; px[o + 3] = Math.round(255 * fade * al);
+    const la = (2 * Math.atan(Math.exp(y0 - ((y + 0.5) / H) * (y0 - y1))) - Math.PI / 2) / DEG, fi = (la - js.lat0) / js.dlat, i0 = clamp(Math.floor(fi), 0, ni - 1);
+    ry0[y] = i0 * nj; ry1[y] = clamp(i0 + 1, 0, ni - 1) * nj; rwy[y] = clamp(fi - i0, 0, 1); rla[y] = la;
+  }
+  const cx0 = new Int32Array(W), cx1 = new Int32Array(W), cwx = new Float32Array(W), clo = new Float32Array(W);
+  for (let x = 0; x < W; x++) {
+    const lo = lonW + ((x + 0.5) / W) * (lonE - lonW), fj = (lo - js.lon0) / js.dlon, j0 = clamp(Math.floor(fj), 0, nj - 1);
+    cx0[x] = j0; cx1[x] = clamp(j0 + 1, 0, nj - 1); cwx[x] = clamp(fj - j0, 0, 1); clo[x] = lo;
+  }
+  const mk = () => { const c = document.createElement("canvas"); c.width = W; c.height = H; return c; };
+  const turbCv = mk(), stormCv = mk(), bounds = [[latS, lonW], [latN, lonE]];
+  clearFields();
+  new CanvasOverlay(turbCv, bounds, { pane: "field", interactive: false, className: "fieldcv" }).addTo(MAP.groups.turb);
+  new CanvasOverlay(stormCv, bounds, { pane: "field", interactive: false, className: "fieldcv" }).addTo(MAP.groups.storms);
+  MAP.fields = { D, frames, W, H, ry0, ry1, rwy, cx0, cx1, cwx, E: js.edr_scale, C: js.cb_scale, turbCv, stormCv, px: [], lastKey: null, line: null,
+    ni, nj, glat0: js.lat0, gdlat: js.dlat, glon0: js.lon0, gdlon: js.dlon,
+    ti: turbCv.getContext("2d").createImageData(W, H), si: stormCv.getContext("2d").createImageData(W, H) };
+  drawField(selT());
+}
+function clearFields() {   // the forecast shading and storm outline of the previous forecast
+  if (!MAP) return;
+  MAP.groups.turb.clearLayers();
+  MAP.groups.storms.eachLayer((l) => { if (l instanceof CanvasOverlay || l === MAP.fields?.line) MAP.groups.storms.removeLayer(l); });
+  MAP.fields = null;
+}
+// one frame resampled to the canvas grid (bilinear), once: then moving the slider is a blend of two ready images
+function framePx(Fd, k) {
+  if (Fd.px[k]) return Fd.px[k];
+  const { W, H, ry0, ry1, rwy, cx0, cx1, cwx } = Fd, A = Fd.frames[k].e, Cb = Fd.frames[k].c, e = new Uint8Array(W * H), c = new Uint8Array(W * H);
+  for (let y = 0, o = 0; y < H; y++) {
+    const r0 = ry0[y], r1 = ry1[y], wy = rwy[y], wy0 = 1 - wy;
+    for (let x = 0; x < W; x++, o++) {
+      const j0 = cx0[x], j1 = cx1[x], wx = cwx[x], wx0 = 1 - wx, a00 = r0 + j0, a01 = r0 + j1, a10 = r1 + j0, a11 = r1 + j1;
+      e[o] = ((A[a00] * wx0 + A[a01] * wx) * wy0 + (A[a10] * wx0 + A[a11] * wx) * wy + 0.5) | 0;
+      c[o] = ((Cb[a00] * wx0 + Cb[a01] * wx) * wy0 + (Cb[a10] * wx0 + Cb[a11] * wx) * wy + 0.5) | 0;
     }
   }
-  cx.putImageData(img, 0, 0);
-  g.clearLayers();
-  L.imageOverlay(cv.toDataURL("image/png"), [[latS, lonW], [latN, lonE]], { opacity: 1, interactive: false }).addTo(g);
+  return (Fd.px[k] = { e, c });
 }
+const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+const rgba = (r, g, b, a) => (LITTLE ? ((a << 24) | (b << 16) | (g << 8) | r) >>> 0 : ((r << 24) | (g << 16) | (b << 8) | a) >>> 0);
+function drawField(t) {
+  const Fd = MAP?.fields, D = F?.D;
+  if (!Fd || !D || Fd.D !== D || t == null) return;
+  const fr = Fd.frames;
+  let k = 0;
+  while (k < fr.length - 2 && fr[k + 1].t <= t) k++;
+  const k2 = Math.min(k + 1, fr.length - 1), w = fr[k2].t > fr[k].t ? Math.round(16 * clamp((t - fr[k].t) / (fr[k2].t - fr[k].t), 0, 1)) / 16 : 0;
+  const mf = (t - D.t0) / MIN, kk = Math.round(gPerEdr(clamp(Math.round(mf), 0, D.M - 1)) * 50) / 50;
+  const key = `${k}:${w}:${kk}:${LAYERS.turb ? 1 : 0}${LAYERS.storms ? 1 : 0}`;
+  if (Fd.lastKey === key) return;
+  Fd.lastKey = key;
+  // colour tables: forecast EDR (0-255 steps) -> bump colour at this aircraft's response; storm tops -> magenta, light
+  const lt = new Uint32Array(256), ls = new Uint32Array(256);
+  for (let v = 0; v < 256; v++) {
+    const gg = kk * v * Fd.E;
+    if (gg >= 0.17) {
+      let lv = 0; while (lv < LEVELS.length - 1 && gg >= LEVELS[lv].max) lv++;
+      const c = LVRGB[Math.max(1, lv)], al = gg < 0.2 ? (0.08 * (gg - 0.17)) / 0.03 : lv === 1 ? 0.08 + 0.32 * clamp((gg - 0.2) / 0.3, 0, 1) : lv === 2 ? 0.55 : 0.65;
+      lt[v] = rgba(c[0], c[1], c[2], Math.round(255 * al));
+    }
+    const top = v * Fd.C;   // thousands of feet: a faint haze from 28,000 ft (soft edges), a little deeper up to 50,000 ft
+    if (top > 28) ls[v] = rgba(255, 45, 149, Math.round(255 * (top < 33 ? (0.06 * (top - 28)) / 5 : 0.06 + 0.14 * clamp((top - 33) / 17, 0, 1))));
+  }
+  const A = framePx(Fd, k), B = framePx(Fd, k2), N = Fd.W * Fd.H, w0 = 1 - w;
+  const tu = new Uint32Array(Fd.ti.data.buffer), su = new Uint32Array(Fd.si.data.buffer);
+  const ae = A.e, be = B.e, ac = A.c, bc = B.c;
+  if (LAYERS.turb) for (let i = 0; i < N; i++) tu[i] = lt[(ae[i] * w0 + be[i] * w + 0.5) | 0];
+  if (LAYERS.storms) for (let i = 0; i < N; i++) su[i] = ls[(ac[i] * w0 + bc[i] * w + 0.5) | 0];
+  if (LAYERS.turb) Fd.turbCv.getContext("2d").putImageData(Fd.ti, 0, 0);
+  if (LAYERS.storms) {
+    Fd.stormCv.getContext("2d").putImageData(Fd.si, 0, 0);
+    // outline where storm tops reach 34,000 ft or more (marching squares on the forecast grid), like a weather chart
+    const segs = stormContour(Fd, k, k2, w);
+    if (Fd.line) Fd.line.setLatLngs(segs);
+    else Fd.line = L.polyline(segs, { pane: "field", color: "#ff2d95", weight: 1.6, opacity: 0.85, dashArray: "3 4", interactive: false }).addTo(MAP.groups.storms);
+  }
+}
+function stormContour(Fd, k, k2, w) {
+  const { ni, nj, glat0, gdlat, glon0, gdlon, C } = Fd, A = Fd.frames[k].c, B = Fd.frames[k2].c, thr = 34 / C, w0 = 1 - w, out = [];
+  const v = (i, j) => A[i * nj + j] * w0 + B[i * nj + j] * w, la = (i) => glat0 + i * gdlat, lo = (j) => glon0 + j * gdlon, f = (p, q) => (thr - p) / (q - p);
+  for (let i = 0; i < ni - 1; i++) for (let j = 0; j < nj - 1; j++) {
+    const a = v(i, j), b = v(i, j + 1), c = v(i + 1, j + 1), d = v(i + 1, j);
+    const idx = (a > thr ? 1 : 0) | (b > thr ? 2 : 0) | (c > thr ? 4 : 0) | (d > thr ? 8 : 0);
+    if (idx === 0 || idx === 15) continue;
+    const T = () => [la(i), lo(j + f(a, b))], R = () => [la(i + f(b, c)), lo(j + 1)], Bm = () => [la(i + 1), lo(j + f(d, c))], Lf = () => [la(i + f(a, d)), lo(j)];
+    switch (idx) {
+      case 1: case 14: out.push([Lf(), T()]); break;
+      case 2: case 13: out.push([T(), R()]); break;
+      case 3: case 12: out.push([Lf(), R()]); break;
+      case 4: case 11: out.push([R(), Bm()]); break;
+      case 6: case 9: out.push([T(), Bm()]); break;
+      case 7: case 8: out.push([Lf(), Bm()]); break;
+      case 5: out.push([Lf(), T()], [R(), Bm()]); break;
+      case 10: out.push([T(), R()], [Lf(), Bm()]); break;
+    }
+  }
+  return out;
+}
+const LVRGB = LEVELS.map((l) => [parseInt(l.hex.slice(1, 3), 16), parseInt(l.hex.slice(3, 5), 16), parseInt(l.hex.slice(5, 7), 16)]);
 
 /* ------------------------------------------------------------------ airport picker */
 let sheetFor = null;
@@ -1538,7 +1945,7 @@ function pickAp(code) {
     if (!r.to && F.dest) r.to = apCode(F.dest);
     F.st.route = r;
   }
-  F.st.last = null; F.D = null; drawn = null; if (MAP) MAP.turbKey = null;
+  F.st.last = null; F.D = null; drawn = null; SEL = null; if (MAP) { MAP.fieldKey = null; MAP.fitted = false; }
   saveF(); closeSheet(); resolveRoute(); renderAll(); refresh();
 }
 
@@ -1561,20 +1968,47 @@ document.querySelectorAll(".tabbar button").forEach((b) => b.addEventListener("c
 document.querySelectorAll("#nSeg button").forEach((b) => b.addEventListener("click", () => setN(+b.dataset.n)));
 $("nSlider").addEventListener("input", (e) => setN(+e.target.value));
 document.querySelectorAll("#feelBtns button").forEach((b) => b.addEventListener("click", () => report(b.dataset.l)));
-document.querySelectorAll("#scaleSeg button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.k)));
 document.querySelectorAll("#layerChips .chip").forEach((b) => b.addEventListener("click", () => {
   const k = b.dataset.l; LAYERS[k] = !LAYERS[k]; store.set("tw:layers", LAYERS); b.setAttribute("aria-pressed", String(LAYERS[k]));
   if (!MAP) return;
-  if (LAYERS[k]) { MAP.groups[k].addTo(MAP.map); if (k === "turb") { MAP.turbKey = null; loadTurb(); } } else MAP.groups[k].remove();
+  const gs = k === "warn" ? [MAP.groups.warn, MAP.groups.chart] : [MAP.groups[k]];
+  for (const g of gs) { if (LAYERS[k]) g.addTo(MAP.map); else g.remove(); }
+  if (MAP.fields) MAP.fields.lastKey = null;
+  mapAt(selT());
 }));
+// the time slider: drag or tap anywhere on it; arrows step 5 min, page keys an hour
+(() => {
+  const sc = $("scrub");
+  let drag = false;
+  const tAt = (x) => { const r = sc.getBoundingClientRect(), [a, b] = flightSpan(); return a + clamp((x - r.left) / Math.max(1, r.width), 0, 1) * (b - a); };
+  sc.addEventListener("pointerdown", (e) => { if (!F?.D?.med || F.D.landed) return; drag = true; try { sc.setPointerCapture(e.pointerId); } catch { /* old browser */ } stopPlay(); sc.classList.add("drag"); setSel(tAt(e.clientX), { pan: true, instant: true }); });
+  sc.addEventListener("pointermove", (e) => { if (drag) setSel(tAt(e.clientX), { pan: true, instant: true }); });
+  const end = () => { if (!drag) return; drag = false; sc.classList.remove("drag"); setSel(selT(), { pan: true }); };
+  sc.addEventListener("pointerup", end); sc.addEventListener("pointercancel", end); sc.addEventListener("lostpointercapture", end);
+  sc.addEventListener("keydown", (e) => {
+    if (!F?.D?.med) return;
+    const [a, b] = flightSpan(), t = selT(), step = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5, PageDown: -60, PageUp: 60 }[e.key];
+    if (step) { e.preventDefault(); stopPlay(); setSel(t + step * MIN, { pan: true }); }
+    else if (e.key === "Home") { e.preventDefault(); setSel(a, { pan: true }); }
+    else if (e.key === "End") { e.preventDefault(); setSel(b, { pan: true }); }
+  });
+  $("ovStrip").addEventListener("click", (e) => {
+    if (!F?.D?.med || F.D.landed) return;
+    const r = $("ovStrip").getBoundingClientRect(), [a, b] = flightSpan();
+    jumpTo(a + clamp((e.clientX - r.left) / Math.max(1, r.width), 0, 1) * (b - a));
+  });
+  $("playBtn").addEventListener("click", togglePlay);
+  $("nowBtn").addEventListener("click", () => { stopPlay(); SEL = null; setSel(Date.now(), { pan: true }); });
+  $("fitBtn").addEventListener("click", () => { stopPlay(); fitFlight(); });
+})();
 $("setFrom").addEventListener("click", () => openSheet("from"));
 $("setTo").addEventListener("click", () => openSheet("to"));
 $("sheetClose").addEventListener("click", closeSheet);
 $("sheet").addEventListener("click", (e) => { if (e.target === $("sheet")) closeSheet(); });
 $("apQ").addEventListener("input", (e) => searchAp(e.target.value));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("sheet").hidden) closeSheet(); });
-$("selCls").addEventListener("change", (e) => { if (!F) return; F.st.cls = e.target.value; saveF(); if (F.D && !F.D.landed) { F.D.cls = classFor().key; fitGP(); renderAll(); drawn = null; if (MAP) MAP.turbKey = null; } });
-$("depInput").addEventListener("change", (e) => { if (!F) return; const t = e.target.value ? new Date(e.target.value).getTime() : null; F.st.dep = Number.isFinite(t) ? t : null; F.st.manual = null; saveF(); drawn = null; if (MAP) MAP.turbKey = null; refresh(); });
+$("selCls").addEventListener("change", (e) => { if (!F) return; F.st.cls = e.target.value; saveF(); if (F.D && !F.D.landed) { F.D.cls = classFor().key; lvCache = null; drawn = null; if (MAP?.fields) MAP.fields.lastKey = null; fitGP(); renderAll(); } });
+$("depInput").addEventListener("change", (e) => { if (!F) return; const t = e.target.value ? new Date(e.target.value).getTime() : null; F.st.dep = Number.isFinite(t) ? t : null; F.st.manual = null; SEL = null; saveF(); drawn = null; if (MAP) { MAP.fieldKey = null; MAP.fitted = false; } refresh(); });
 $("editPos").addEventListener("click", () => startEdit());
 $("gpsRow").addEventListener("click", () => gpsToggle());
 $("nGps").addEventListener("click", () => gpsToggle());

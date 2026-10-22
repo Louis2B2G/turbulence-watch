@@ -1,8 +1,8 @@
 # Turbulence Watch
 
-Live turbulence forecast for any flight. Type a flight number and see where the plane is, where it's headed, every bumpy stretch ahead with times, and how big the jolts will be in g, with the odds.
+Live turbulence forecast for any flight. Type a flight number and get a straight answer: how bumpy it will be, when, why, and whether any of it is worth worrying about. Then slide through the flight to see where you'll be at any moment, and the storms and turbulence forecast around you then.
 
-![Now, Map and Flight screens](docs/screens.png)
+![Flight, Map and Details screens](docs/screens.png)
 
 It uses the forecasts airlines plan with (the ICAO World Area Forecast System), checks them against three independent models, adds official warnings, pilot reports and live satellite storm detection, and turns turbulence intensity into g-forces for your aircraft size and weight.
 
@@ -12,13 +12,15 @@ Not an operational tool. The crew has weather radar, real-time reports from othe
 
 | | |
 |---|---|
+| **Time slider** | One slider across the whole flight drives the map and a readout: the plane where it will be (with the ring it will most likely be in), the forecast turbulence and thunderstorm areas at cruising height for that moment (3-hourly fields blended in time), the official warnings in force and the significant-weather chart for then, and the odds for the 20 minutes around it. Live satellite layers fade out as you move more than an hour from the present. |
 | **Position** | Live ADS-B position (adsb.lol, adsb.fi, OpenSky). Over oceans trackers lose the plane, so the app moves it along the projected path from the last fix; you can also set your takeoff time or tap where you are. |
 | **Route** | From the flight-number databases (adsbdb, adsb.lol), checked against the plane's position and heading. Stale or reversed routes are caught and flagged, and you can override them. |
 | **Projected path** | Great circle to the destination, turning in from the current heading, with climb, cruise and descent speeds. An 80% corridor shows how far real routes stray from that line (about 3% of the distance, pinching to zero at landing). |
 | **Clear-air turbulence** | Official WAFS gridded turbulence (EDR) at FL340 and FL390, blended with a GTG-style ensemble on NOAA GFS, ECMWF IFS and ECMWF AIFS (AI model): 8 turbulence diagnostics per model on two cruise layers, quantile-mapped onto the official EDR scale, weighted by your flight level. Weights: WAFS 0.4, IFS 0.25, GFS 0.2, AIFS 0.15. |
 | **Storms** | WAFS cumulonimbus tops, a convective proxy from GFS instability, rain and high cloud, the WAFS significant-weather chart, and live satellite storms for the next 3 hours (Meteosat storm objects and MTG lightning; cold cloud tops from GOES-East, GOES-West and Himawari). |
+| **Wind near the ground** | Gusty surface wind makes the last minutes of an approach and the first of a climb bumpy whatever the forecast aloft says. Friction velocity from 122 ECMWF, NOAA and DWD ensemble forecasts at each airport (log profile and gust estimates combined) gives boundary-layer turbulence below ~7,000 ft. |
 | **Warnings and reports** | International and US SIGMETs (turbulence, thunderstorms, mountain waves, cyclones) in force when you get there, and recent pilot reports near your path and level (NOAA Aviation Weather Center). |
-| **g-forces** | EDR becomes peak extra g through a gust-response model scaled by aircraft class (wide-body to turboprop) and by weight, which drops as fuel burns. A Monte Carlo of 4,000 runs adds patchiness and forecast error, giving the distribution of the biggest jolt in the next 10 minutes to 3 hours. |
+| **g-forces** | EDR becomes peak extra g through a gust-response model scaled by aircraft class (wide-body to turboprop) and by weight, which drops as fuel burns. A Monte Carlo of 4,000 runs adds the patchiness of real air (lognormal, ~6-minute memory) and forecast error that persists for an hour or more (its spread from how far the forecasts disagree), giving the distribution of the biggest jolt in any window from 10 minutes to 3 hours. |
 | **Your reports** | Tap Smooth / Light / Moderate / Severe. A Gaussian process (constant "this plane feels rougher" term plus a 40-minute Matérn term for "the forecast is wrong about this patch") corrects the forecast for the next stretch. Reports stay in your browser. |
 | **Rarity** | Each jolt size framed as "about 1 in N flights like yours" and "rougher than X% of cruise time", from airline turbulence statistics. |
 

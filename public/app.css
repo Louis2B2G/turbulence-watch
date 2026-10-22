@@ -168,6 +168,84 @@ input[type=range]{width:100%;accent-color:var(--tint)}
 .sheet input{font:400 17px var(--f);color:var(--label);background:var(--fill);border:0;border-radius:10px;padding:10px 12px;width:100%}
 .sheet .res{overflow:auto;-webkit-overflow-scrolling:touch;border-radius:12px;background:var(--card)}
 
+/* flight tab: the answer, the strip, right now */
+.verdict{padding:18px 16px 14px;display:flex;flex-direction:column;gap:6px}
+.verdict .lvl{display:flex;align-items:center;gap:10px;font:700 26px/1.12 var(--fr)}
+.verdict .lvl .dot{width:14px;height:14px}
+.verdict .calm{font-size:17px;line-height:1.35}
+.verdict .small{font-size:14px;color:var(--label2)}
+.jump{margin-top:6px;border:0;border-radius:10px;background:var(--fill);color:var(--label);font:500 15px/1.35 var(--f);text-align:left;padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px}
+.jump .chev{margin-left:auto}
+.lvl2{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap;font:700 22px/1.2 var(--fr);margin-bottom:6px}
+.lvl2 .dot{width:12px;height:12px;align-self:center}
+.lvl2 .feelx{font:400 14px var(--f);color:var(--label2)}
+#nowCard .small{font-size:14px;color:var(--label2);margin-top:4px}
+.strip{position:relative;cursor:pointer}
+.barwrap{height:22px;border-radius:7px;overflow:hidden;background:var(--card2)}
+.barwrap svg{display:block;width:100%;height:100%}
+.ticks{position:relative;height:16px;margin-top:5px;font-size:11px;color:var(--label2)}
+.ticks span{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ticks .end.l{transform:none;color:var(--label);font-weight:600}.ticks .end.r{transform:translateX(-100%);color:var(--label);font-weight:600}
+.ticks .nowmark{position:absolute;top:-27px;width:3px;height:22px;margin-left:-1.5px;background:var(--label);border-radius:2px;box-shadow:0 0 0 1.5px var(--card)}
+.mix{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:13px;color:var(--label2)}
+.mix span{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
+.mix .dot{width:8px;height:8px}
+.mix .mixnote{color:var(--label3)}
+.row.seg2{gap:10px}
+.seg2 .k{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.seg2 .k>span{display:flex;flex-direction:column;min-width:0}
+.seg2 .k b{font-weight:600}
+.seg2 .v{display:flex;flex-direction:column;align-items:flex-end;flex:none;color:var(--label)}
+.seg2 .v small{white-space:nowrap}
+.seg2 .chev{margin-left:0}
+
+/* map tab: the map at the chosen moment, the time slider, the readout */
+body[data-tab="map"] .nav h1{font-size:24px}
+body[data-tab="map"] .nav{padding-top:0}
+body[data-tab="map"] .status{padding-bottom:6px}
+body[data-tab="map"] #banner{display:none!important}   /* the map has its own GPS and correct-position buttons */
+.mapcard{margin-top:2px}
+#map{height:calc(100vh - 410px);height:calc(100dvh - 410px);min-height:280px;max-height:640px}
+.mapbadge{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:900;max-width:calc(100% - 120px);overflow:hidden;text-overflow:ellipsis;background:rgba(20,22,28,.84);color:#fff;font:600 13px var(--f);padding:6px 12px;border-radius:999px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);white-space:nowrap;pointer-events:none;box-shadow:0 1px 6px rgba(0,0,0,.35)}
+.mapbadge.now{background:rgba(10,132,255,.9)}
+.scrubwrap{padding:4px 14px 12px}
+.scrub{position:relative;padding-top:34px;touch-action:pan-y;cursor:pointer;outline:none;-webkit-user-select:none;user-select:none}
+.scrub .thumb{position:absolute;top:34px;width:0;height:22px;pointer-events:none}
+.scrub .thumb::before{content:"";position:absolute;left:-14px;top:-3px;width:28px;height:28px;border-radius:50%;background:#fff;box-shadow:0 1px 5px rgba(0,0,0,.4),0 0 0 .5px rgba(0,0,0,.12);transition:transform .12s}
+.scrub.drag .thumb::before{transform:scale(1.12)}
+.scrub:focus-visible .thumb::before{box-shadow:0 0 0 3px var(--tint),0 1px 5px rgba(0,0,0,.4)}
+.scrub .bubble{position:absolute;bottom:30px;left:0;transform:translateX(-50%);white-space:nowrap;background:var(--label);color:var(--card);font:600 13px var(--f);padding:4px 9px;border-radius:8px;font-variant-numeric:tabular-nums}
+.scrubbtns{display:flex;gap:8px;align-items:center;margin-top:4px}
+.scrubbtns .flex{flex:1}
+.pill.sm{font-size:14px;padding:6px 12px;display:inline-flex;align-items:center;gap:6px}
+.pill.sm svg{width:12px;height:12px}
+.pill.on{background:var(--tint);color:#fff}
+.moment{margin-top:10px;padding:14px 16px;display:flex;flex-direction:column;gap:9px}
+.mwhen{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}
+.mwhen b{font:700 22px/1.15 var(--fr);font-variant-numeric:tabular-nums}.mwhen span{color:var(--label2);font-size:14px}
+.mwhere{font-size:14px;color:var(--label2);margin-top:-5px}
+.mlvl{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}
+.mlvl .dot{width:12px;height:12px;align-self:center}
+.mlvl b{font:700 19px var(--fr)}.mlvl span{font-size:15px}
+.mworry{font-size:15px;line-height:1.35;padding:9px 12px;border-radius:10px;background:color-mix(in srgb,var(--green) 15%,transparent)}
+.mworry.mid{background:color-mix(in srgb,var(--orange) 17%,transparent)}
+.mworry.warn{background:color-mix(in srgb,var(--red) 17%,transparent)}
+.mstats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (min-width:560px){.mstats{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.mstats div{background:var(--card2);border-radius:10px;padding:8px 10px;min-width:0}
+.mstats span{display:block;font-size:12px;color:var(--label2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mstats b{font:600 18px/1.25 var(--fr)}
+.mnote{font-size:13px;color:var(--label2);line-height:1.35}
+.mwhy{display:flex;flex-direction:column;gap:3px;font-size:14px;line-height:1.35}
+.mwhy span{color:var(--label2)}
+#layerChips{padding:12px 0 0}
+.legend3{margin-top:10px}
+.legend3 summary{padding:12px 16px;font-size:15px;color:var(--tint);cursor:pointer;list-style:none}
+.legend3 summary::-webkit-details-marker{display:none}
+.legend3 summary::after{content:" ›"}
+.legend3[open] summary::after{content:" ⌄"}
+.plane.sel .planeLab{background:rgba(20,22,28,.7);padding:1px 6px;border-radius:6px;top:7px!important}
+
 /* map legend */
 .legend2{display:grid;grid-template-columns:1fr;gap:4px;padding:6px 16px 14px}
 @media (min-width:600px){.legend2{grid-template-columns:1fr 1fr;column-gap:20px}}
