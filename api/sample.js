@@ -84,9 +84,10 @@ export default async function handler(req, res) {
     const o = {
       wafs: r3(wafsAt(tval(p, "wafs340", 1, e), tval(p, "wafs390", 1, e), p.fl)),
       ifs: r3(mdl("ifs")), gfs: r3(mdl("gfs")), aifs: r3(mdl("aifs")),
-      conv: r3(tval(p, "conv", 0, e)), cb: r3(tval(p, "cbtop", 1, m.scale.cbtop_kft, false)), w: wind(p),
+      conv: r3(tval(p, "conv", 0, e)), cb: r3(tval(p, "cbtop", 1, m.scale.cbtop_kft, false)),
     };
-    // SIGMETs in force when the plane gets there (1 h early / 30 min late margin) at its level, inside or within 40 km
+    // SIGMETs in force when the plane gets there (1 h early / 30 min late margin) at its level, inside or within 40 km.
+    // `w` holds their ids and nothing else: the app reads every entry of it as a warning (wind comes from only: "wind").
     const hits = [];
     for (const s of sig) {
       if (p.t < s.from - 3600e3 || p.t > s.to + 1800e3) continue;
