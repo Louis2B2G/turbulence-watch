@@ -491,7 +491,8 @@ function combine(path, plan, smp, nc, fx) {
     const lv = MEMBERS.filter((m) => c[m] != null).map((m) => Math.log(Math.max(0.02, c[m])));
     const mean = lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
     const sd = lv.length > 1 ? Math.sqrt(lv.reduce((a, b) => a + (b - mean) ** 2, 0) / lv.length) : 0.4;
-    const hi = Math.max(...ev.map((x) => x.e), ...MEMBERS.map((m) => c[m] ?? 0), med * Math.exp(1.28 * Math.max(0.35, sd + 0.3)));
+    // upper estimate (~90th percentile): how far the forecasts disagree, plus what all of them miss, added in quadrature
+    const hi = Math.max(...ev.map((x) => x.e), ...MEMBERS.map((m) => c[m] ?? 0), med * Math.exp(1.28 * Math.hypot(sd, 0.3)));
     // descriptive flags
     const ids = new Set(nodes.flatMap((n) => n.w || []));
     for (const id of ids) { const x = sig.get(id); if (x) flags.push(`Official warning: ${x.qualifier ? x.qualifier.toLowerCase() + " " : ""}${HAZ_NAME[x.hazard] || x.hazard} (${x.fir.trim()})`); }
@@ -506,6 +507,52 @@ function combine(path, plan, smp, nc, fx) {
   return steps;
 }
 
+/* ------------------------------------------------------------------ wind near the ground (climb-out and approach) */
+// The upper-air forecasts say nothing about the lowest 1-2 km, where a strong surface wind churns the air. Low-level
+// turbulence from the friction velocity u*: dissipation eps(z) = u*^3 / (kappa z) * (1 - z/h), boundary-layer depth
+// h ~ 0.2 u*/f (500-2000 m), EDR = eps^(1/3). Eddies under ~150 m are smaller than an airliner, so z is floored there.
+// u* percentiles per hour at each airport come from /api/airwind (ECMWF, NOAA and DWD ensembles).
+const LOWFL = 70;   // only below ~7,000 ft
+function blEdr(us, z, lat) {
+  const f = Math.max(5e-5, 1.458e-4 * Math.abs(Math.sin(lat * DEG))), h = clamp((0.2 * us) / f, 500, 2000);
+  return us > 0 && z < h ? Math.cbrt((us ** 3 / (0.4 * Math.max(z, 150))) * (1 - z / h)) : 0;
+}
+function lowWindows(path) {   // minutes below ~7,000 ft at the departure end and at the arrival end
+  if (path.straight) return [];
+  const dep = [], arr = [];
+  for (let m = 0; m < path.M; m++) if (path.fl[m] < LOWFL) (m < path.M / 2 ? dep : arr).push(m);
+  const out = [];
+  if (dep.length && F.origin) out.push({ end: "dep", ap: F.origin, ms: dep });
+  if (arr.length && F.dest) out.push({ end: "arr", ap: F.dest, ms: arr });
+  return out;
+}
+async function airWind(path, t0) {
+  const W = lowWindows(path);
+  if (!W.length) return null;
+  const js = await api("/api/airwind", { body: { sites: W.map((w) => ({ lat: w.ap.lat, lon: w.ap.lon, from: t0 + w.ms[0] * MIN, to: t0 + w.ms[w.ms.length - 1] * MIN })) } }, 15000);
+  const out = W.map((w, i) => ({ ...w, site: js?.sites?.[i] || null })).filter((w) => w.site?.hours?.length);
+  return out.length ? out : null;
+}
+function usAt(site, t) {   // the hourly u*, gust and wind numbers interpolated to time t
+  const H = site.hours;
+  if (t <= H[0].t) return H[0];
+  for (let i = 0; i < H.length - 1; i++) if (t <= H[i + 1].t) {
+    const a = H[i], b = H[i + 1], w = (t - a.t) / (b.t - a.t), L = (x, y) => (x == null || y == null ? x ?? y : x + (y - x) * w);
+    return { t, us: a.us.map((x, k) => L(x, b.us[k])), g: a.g.map((x, k) => L(x, b.g[k])), u: L(a.u, b.u), dir: w < 0.5 ? a.dir : b.dir };
+  }
+  return H[H.length - 1];
+}
+function blAt(AW, path, t0, m) {   // low-level EDR (median and 90th percentile) where the plane is low over either airport
+  if (!AW) return null;
+  for (const w of AW) {
+    if (m < w.ms[0] || m > w.ms[w.ms.length - 1] || path.fl[m] >= LOWFL) continue;
+    const x = usAt(w.site, t0 + m * MIN), z = Math.max(0, path.fl[m] * 30.48 - (w.site.elev ?? 0));
+    return { e50: blEdr(x.us[1], z, w.ap.lat), e90: blEdr(x.us[2], z, w.ap.lat), w, x };
+  }
+  return null;
+}
+const KT = 1.944;
+
 /* ------------------------------------------------------------------ the whole forecast for this flight */
 async function compute() {
   const fx = positionNow();
@@ -518,11 +565,16 @@ async function compute() {
   try { windAt = await windsAlong(buildPath(fx, F.dest, cls), fx.t); } catch { windAt = null; }
   const path = buildPath(fx, F.dest, cls, windAt), sigma = corridor(path, fx);
   const t0 = fx.t, M = path.M, now = Date.now();
-  // sampling plan: every 5 min for the next 4 h, then every 10 min; centre + both sides of the corridor
-  const m0 = clamp(Math.floor((now - t0) / MIN) - 5, 0, M - 1), ms = [];
+  const awP = airWind(path, t0).catch(() => null);
+  // sampling plan: every 5 min for the next 4 h, then every 10 min, plus every 2 min while low near either airport;
+  // centre + both sides of the corridor (at most 200 steps: the API takes 600 points)
+  const m0 = clamp(Math.floor((now - t0) / MIN) - 5, 0, M - 1);
+  let ms = [];
   for (let m = m0; m < M; m += m - m0 < 240 ? 5 : 10) ms.push(m);
   if (ms[ms.length - 1] !== M - 1) ms.push(M - 1);
-  while (ms.length > 200) for (let i = ms.length - 2; i > 0; i -= 2) ms.splice(i, 1);
+  const lowMs = lowWindows(path).flatMap((w) => w.ms.filter((m, i) => m >= m0 && i % 2 === 0)).slice(0, 30);
+  while (ms.length > 200 - lowMs.length) for (let i = ms.length - 2; i > 0 && ms.length > 200 - lowMs.length; i -= 2) ms.splice(i, 1);
+  ms = [...new Set([...ms, ...lowMs])].sort((a, b) => a - b);
   const plan = ms.map((m) => ({ m, t: t0 + m * MIN, lat: path.lat[m], lon: path.lon[m], fl: Math.max(path.fl[m], 100), ph: path.ph[m] }));
   const points = [];
   for (const p of plan) {
@@ -533,8 +585,24 @@ async function compute() {
   }
   const ncPts = [];
   plan.forEach((p) => { const lead = (p.t - now) / HOUR; if (lead > -0.2 && lead <= 3.2) { p.nci = ncPts.length; ncPts.push({ lat: p.lat, lon: p.lon, lead: Math.max(0, lead) }); } });
-  const [smp, nc] = await Promise.all([api("/api/sample", { body: { points } }, 40000), nowcast(ncPts).catch(() => null)]);
+  const [smp, nc, AW] = await Promise.all([api("/api/sample", { body: { points } }, 40000), nowcast(ncPts).catch(() => null), awP]);
   const steps = combine(path, plan, smp, nc, fx);
+  // wind near the ground at either end: raises the low steps where it beats the upper-air forecasts
+  const ground = (AW || []).map((w) => {
+    const x = usAt(w.site, t0 + w.ms[w.end === "dep" ? 0 : w.ms.length - 1] * MIN);
+    return { w, end: w.end, ap: apCode(w.ap), n: w.site.n, g50: Math.round(x.g[0] * KT), g90: Math.round(x.g[1] * KT), u: Math.round(x.u * KT), dir: x.dir,
+      flag: `Forecast wind at ${apCode(w.ap)} ${w.end === "dep" ? "for takeoff" : "for landing"}: ${Math.round(x.u * KT)} kt gusting ${Math.round(x.g[0] * KT)}, up to ${Math.round(x.g[1] * KT)} kt${x.dir != null ? ` from ${x.dir}°` : ""}` };
+  });
+  const UPB = Math.exp(1.28 * 0.3);
+  for (const s of steps) {
+    const b = blAt(AW, path, t0, s.m);
+    if (!b || b.e50 < 0.02) continue;
+    s.mem.wind = +b.e50.toFixed(3);
+    if (b.e50 >= s.med) s.drv = "wind";
+    s.med = Math.max(s.med, b.e50); s.hi = Math.max(s.hi, b.e90 * UPB);
+    const gr = ground.find((g) => g.w === b.w);
+    if (gr && b.e50 >= 0.05) s.flags.push(gr.flag);
+  }
   // per-minute median and upper EDR
   const med = new Array(M).fill(0), hi = new Array(M).fill(0);
   let j = 0;
@@ -543,6 +611,8 @@ async function compute() {
     const a = steps[j], b = steps[Math.min(j + 1, steps.length - 1)];
     const w = b.m > a.m ? clamp((m - a.m) / (b.m - a.m), 0, 1) : 0;
     med[m] = +(a.med + (b.med - a.med) * w).toFixed(4); hi[m] = +(a.hi + (b.hi - a.hi) * w).toFixed(4);
+    const bl = blAt(AW, path, t0, m);
+    if (bl && bl.e50 > 0) { med[m] = Math.max(med[m], +bl.e50.toFixed(4)); hi[m] = Math.max(hi[m], +(bl.e90 * UPB).toFixed(4)); }
   }
   const L = F.origin && F.dest ? hav(F.origin.lat, F.origin.lon, F.dest.lat, F.dest.lon) : null;
   F.D = {
@@ -552,6 +622,7 @@ async function compute() {
     dist: path.dist.map((x) => (x == null ? null : Math.round(x))), sig: sigma.map((x) => Math.round(x)), L,
     med, hi, steps, sigmets: smp.sigmets || [], pireps: smp.pireps || [], sources: smp.sources, updated: smp.updated, range: smp.range,
     nc: nc ? { n: ncPts.length, sats: [...new Set(nc.filter((x) => x.sat).map((x) => x.sat))] } : null,
+    ground: ground.map(({ w, ...g }) => g),
     cls: cls.key, fixKind: fx.kind,
   };
   logForecast();
@@ -611,21 +682,30 @@ function fitGP() {
 const gpFactor = () => (GP ? GP.factor : 1);
 
 function randn() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
-// Monte Carlo of the biggest jolt in the next n minutes: per-minute peak g = k * 0.55 * EDR * lognormal patchiness (AR(1),
-// ~6 min memory) * forecast-error term; spread widens where the forecasts disagree.
+// Monte Carlo of the biggest jolt in the next n minutes: per-minute peak g = k * 0.55 * EDR * patchiness * forecast error.
+// Patchiness: lognormal AR(1), sigma 0.45, ~6 min memory (the air itself). Forecast error: lognormal AR(1) with ~90 min
+// memory, because a forecast that is off stays off for a while; its spread is the forecasts' own (median to the upper
+// estimate = 1.28 sigma). Treating forecast error as minute-to-minute noise, as before, fattened every tail.
+const SP = 0.45;
+const fErr = (m) => clamp(Math.log(Math.max(F.D.hi[m], F.D.med[m]) / Math.max(F.D.med[m], 1e-3)) / 1.28, 0.2, 0.7);
 function simulate(n) {
   const D = F.D, start = Math.max(0, nowMin()), S = 4000, rho = Math.exp(-1 / 6), sq = Math.sqrt(1 - rho * rho), R = 0.55, PF = 0.15;
-  const Fm = [], SIG = [], K = [];
+  const rf = Math.exp(-1 / 90), sqf = Math.sqrt(1 - rf * rf);
+  const Fm = [], SF = [], K = [];
   for (let i = 0; i < n; i++) {
     const m = clamp(Math.round(start + i), 0, D.M - 1);
-    let f = D.med[m], s = 0.45 + 0.25 * clamp(Math.log(Math.max(D.hi[m], f) / Math.max(f, 1e-3)), 0, 1);
-    if (GP) { f *= Math.exp(GP.mean[m]); s *= Math.sqrt(0.5 + 0.5 * Math.min(1, (GP.sd[m] * GP.sd[m]) / (GP.prior * GP.prior))); }
-    Fm.push(f); SIG.push(s); K.push(kAt(m));
+    let f = D.med[m], sf = fErr(m);
+    if (GP) { f *= Math.exp(GP.mean[m]); sf *= Math.sqrt(0.3 + 0.7 * Math.min(1, (GP.sd[m] * GP.sd[m]) / (GP.prior * GP.prior))); }
+    Fm.push(f); SF.push(sf); K.push(kAt(m));
   }
   const out = new Float64Array(S);
   for (let s = 0; s < S; s++) {
-    let z = randn(), mx = 0;
-    for (let i = 0; i < n; i++) { z = rho * z + sq * randn(); const g = K[i] * R * Fm[i] * Math.exp(SIG[i] * z + PF * randn()); if (g > mx) mx = g; }
+    let z = randn(), y = randn(), mx = 0;
+    for (let i = 0; i < n; i++) {
+      z = rho * z + sq * randn(); y = rf * y + sqf * randn();
+      const g = K[i] * R * Fm[i] * Math.exp(SP * z + SF[i] * y + PF * randn());
+      if (g > mx) mx = g;
+    }
     out[s] = mx;
   }
   out.sort();
@@ -635,18 +715,17 @@ function simulate(n) {
 }
 const pct = (p) => (p < 0.001 ? "<0.1%" : p < 0.01 ? (p * 100).toFixed(1) + "%" : Math.round(p * 100) + "%");
 // Typical biggest jolt over a ~20 min stretch at minute m: the simulation's median in closed form
-// (median of the 20-min max of the lognormal process = exp(1.232 SIG + 0.095)), so the timeline, the map and the
-// "next 20 min" headline all speak the same language.
+// (median of the 20-min max of the lognormal patchiness = exp(1.232 SIG + 0.095); the forecast error has median 1, so it
+// leaves the median alone), so the timeline, the map and the "next 20 min" headline all speak the same language.
 const STRETCH = (sig) => 0.55 * Math.exp(1.232 * sig + 0.095);
 function gStretch(m) {
   const D = F.D;
   m = clamp(Math.round(m), 0, D.M - 1);
   const f = D.med[m] * (GP ? Math.exp(GP.mean[m]) : 1);
-  const sig = 0.45 + 0.25 * clamp(Math.log(Math.max(D.hi[m], D.med[m]) / Math.max(D.med[m], 1e-3)), 0, 1);
-  return kAt(m) * f * STRETCH(sig);
+  return kAt(m) * f * STRETCH(SP);
 }
 const gAtStep = (s) => gStretch(s.m);
-const gPerEdr = (m) => gpFactor() * kAt(m) * STRETCH(0.6);   // for single EDR numbers (map layer, forecast bars)
+const gPerEdr = (m) => gpFactor() * kAt(m) * STRETCH(SP);   // for single EDR numbers (map layer, forecast bars)
 
 /* ------------------------------------------------------------------ forecast log (to score your reports later) */
 function logForecast() {
@@ -950,7 +1029,8 @@ function segments() {
       for (const [k, v] of Object.entries(s.mem)) last.mem[k] = Math.max(last.mem[k] ?? 0, v);
     } else out.push({ key: lv.key, name: lv.name, c: lv.c, start: Math.max(s.t, now), end, peakG: g, peakE: s.med, drv: new Set([s.drv]), flags: new Set(s.flags), mem: { ...s.mem } });
   });
-  for (const s of out) s.why = s.drv.has("storm") && s.drv.has("jet") ? "Storms and jet-stream shear" : s.drv.has("storm") ? "Storm clouds near the route" : "Jet-stream wind shear";
+  for (const s of out) s.why = s.drv.has("wind") ? (s.drv.has("storm") ? "Gusty wind near the ground, storms" : "Gusty wind near the ground")
+    : s.drv.has("storm") && s.drv.has("jet") ? "Storms and jet-stream shear" : s.drv.has("storm") ? "Storm clouds near the route" : "Jet-stream wind shear";
   return out;
 }
 
@@ -981,6 +1061,7 @@ function renderTrip() {
   }
   if (D?.wind) dl.push(["Cruise wind here", `${Math.round(Math.hypot(D.wind.w[0], D.wind.w[1]) * 3.6)} km/h, ${Math.abs(D.wind.along)} km/h ${D.wind.along >= 0 ? "tailwind" : "headwind"} (GFS)`]);
   if (D?.nc) dl.push(["Satellite storms", D.nc.sats.length ? D.nc.sats.join(", ") : "no coverage on this stretch"]);
+  for (const g of D?.ground || []) dl.push([`Wind at ${esc(g.ap)} for ${g.end === "dep" ? "takeoff" : "landing"}`, `${g.u} kt gusting ${g.g50}, up to ${g.g90} kt${g.dir != null ? ` from ${g.dir}°` : ""} (${g.n} forecasts)`]);
   $("dataList").innerHTML = dl.map(([a, b]) => `<div class="row"><span class="k">${a}</span><span class="v">${b}</span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2)">Loading…</span></div>`;
 
   if (!D || D.landed || !D.med) { $("timeline").innerHTML = ""; $("segList").innerHTML = ""; $("agree").innerHTML = ""; $("warnList").innerHTML = ""; return; }
@@ -995,7 +1076,7 @@ function renderTrip() {
   s += `<text class="t" x="354" y="61" text-anchor="end">${D.arr ? "landing " + fmtT(t1) : "next 3 hours (route unknown)"}</text>`;
   $("timeline").innerHTML = s;
   $("segList").innerHTML = segs.map((m) => `<div class="row"><span class="k" style="display:flex;align-items:center;gap:10px"><i class="dot" style="background:var(${m.c})"></i><span>${m.name}${m.key !== "smooth" ? `<br><small>${m.why}</small>` : ""}</span></span><span class="v num">${fmtR(m.start, m.end)}<br><small>up to ±${m.peakG.toFixed(2)} g</small></span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2)">Nothing left to forecast.</span></div>`;
-  const NAME = { wafs: "Official WAFS", ifs: "ECMWF", gfs: "NOAA GFS", aifs: "ECMWF AI", storm: "Storms" };
+  const NAME = { wafs: "Official WAFS", ifs: "ECMWF", gfs: "NOAA GFS", aifs: "ECMWF AI", storm: "Storms", wind: "Ground wind" };
   const ag = segs.filter((x) => x.key !== "smooth").slice(0, 4);
   $("agree").innerHTML = ag.length ? ag.map((x, i) => `<div style="font-size:15px;font-weight:600;margin:${i ? 14 : 0}px 0 8px">${fmtR(x.start, x.end)}</div><div class="mem">${Object.entries(x.mem).sort((a, b) => (a[0] === "storm") - (b[0] === "storm")).map(([k, v]) => `<span>${NAME[k] || k}</span><span class="b"><i style="width:${Math.min(100, (v / 0.5) * 100)}%;background:${col(gPerEdr(nowMin()) * v)}"></i></span><span class="num">${v.toFixed(2)}</span>`).join("")}</div>`).join("") : `<div style="color:var(--label2);font-size:15px">No bumpy stretches left to compare.</div>`;
   // warnings and pilot reports
@@ -1004,12 +1085,12 @@ function renderTrip() {
   fsteps.forEach((x, i) => {
     const end = i < fsteps.length - 1 ? fsteps[i + 1].t : D.arr || x.t + 5 * MIN;
     for (const f of x.flags) {
-      if (!(/^(Official|Pilot|Forecast chart)/.test(f) || /satellite/.test(f))) continue;
+      if (!(/^(Official|Pilot|Forecast chart|Forecast wind)/.test(f) || /satellite/.test(f))) continue;
       const sp = fspan.get(f);
       if (!sp) fspan.set(f, [Math.max(x.t, now), end]); else sp[1] = Math.max(sp[1], end);
     }
   });
-  const rank = (f) => (/^Official/.test(f) ? 0 : /satellite/.test(f) ? 1 : /^Pilot/.test(f) ? 2 : 3);
+  const rank = (f) => (/^Official/.test(f) ? 0 : /satellite/.test(f) ? 1 : /^Pilot/.test(f) ? 2 : /^Forecast wind/.test(f) ? 4 : 3);
   const rows = [...fspan.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[1][0] - b[1][0]).slice(0, 12);
   $("warnList").innerHTML = rows.map(([f, [a, b]]) => `<div class="row"><span class="k" style="font-size:15px">${esc(f)}</span><span class="v"><small>${fmtR(a, b)}</small></span></div>`).join("") || `<div class="row"><span class="k" style="color:var(--label2);font-size:15px">No official warnings or pilot reports on your path for when you'll be there.</span></div>`;
 }
