@@ -1,5 +1,7 @@
-# Builds the global forecast fields every hour and publishes them to the `data` branch, which the app reads.
+# Builds the global forecast fields and publishes them to the `data` branch, which the app reads.
 # A build only runs when a new WAFS issue or model run (GFS, ECMWF IFS, ECMWF AIFS) is out, so most runs take a few seconds.
+# GitHub often runs the hourly schedule only every few hours, so each run also queues the next check itself, ~30 min on
+# (last step). To stop the loop, disable this workflow in the Actions tab.
 name: Forecast fields
 
 on:
@@ -14,7 +16,10 @@ on:
 
 permissions:
   contents: write
+  actions: write   # to queue the next run
 
+# At most one run going and one waiting: a newer waiting run cancels an older one, so the self-queued runs and the
+# schedule can't pile up into parallel loops.
 concurrency:
   group: forecast-fields
   cancel-in-progress: false
@@ -22,7 +27,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v4
 
@@ -62,5 +67,14 @@ jobs:
           git commit -q -m "Forecast fields $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
           echo "Published $(ls | wc -l) files, $(du -sh . | cut -f1)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Runs after a failed build too (a flaky download shouldn't end the loop), but not after a cancel.
+      - name: Queue the next check in ~25 min
+        if: ${{ !cancelled() }}
+        run: |
+          sleep 1500
+          gh workflow run fields.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
