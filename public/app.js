@@ -770,7 +770,8 @@ function stripSVG() {
 // Hour ticks under a strip spanning a..b, plus the ends (and "now" when it's inside)
 function ticksHTML(a, b, ends) {
   const span = Math.max(1, b - a), stepH = span > 10 * HOUR ? 3 : span > 5 * HOUR ? 2 : 1, out = [], pos = (t) => (100 * (t - a)) / span;
-  for (let h = Math.ceil(a / (stepH * HOUR)) * stepH * HOUR; h < b; h += stepH * HOUR) { const p = pos(h); if (p > 9 && p < 86) out.push(`<span style="left:${p.toFixed(2)}%">${fmtT(h)}</span>`); }
+  const wide = fmtT(a).length > 5, lo = wide ? 17 : 10, hi = wide ? 76 : 86;   // "6:00 AM" needs more room than "06:00"
+  for (let h = Math.ceil(a / (stepH * HOUR)) * stepH * HOUR; h < b; h += stepH * HOUR) { const p = pos(h); if (p > lo && p < hi) out.push(`<span style="left:${p.toFixed(2)}%">${fmtT(h)}</span>`); }
   if (ends) {
     const flying = airborneKind(F.D.fixKind);
     out.push(`<span class="end l" style="left:0">${flying ? "now" : fmtT(a)}</span>`);
